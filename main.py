@@ -84,6 +84,7 @@ if not check_password():
 
 # ────────── Gemini Functions ──────────
 
+
 def get_mime(path: str) -> str:
     m, _ = mimetypes.guess_type(path)
     return m or "application/octet-stream"
@@ -191,9 +192,6 @@ def gem_extract(path: str, user_prompt: str) -> str:
         contents=[prompt, gfile],
     )
     return resp.text.strip()
-
-# ────────── Streaming assistant responses ──────────
-
 
 def stream_answer(thread_id: str, assistant_id: str) -> Tuple[str, List[Tuple[str, bytes]]]:
     run = oa_client.beta.threads.runs.create(
@@ -589,7 +587,7 @@ if page == "Chat":
         st.sidebar.error("Please select a motion type to enable chat.")
         st.stop()
 
-    # ─────Download─────
+    # ───── DOWNLOAD ─────
     for h in st.session_state.history:
         with st.chat_message(h["role"]):
             st.markdown(h["content"])
