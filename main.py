@@ -82,11 +82,7 @@ def check_password():
 if not check_password():
     st.stop()  # Do not continue if check_password is not True.
 
-
-
-
-
-
+# ────────── Gemini Functions ──────────
 
 def get_mime(path: str) -> str:
     m, _ = mimetypes.guess_type(path)
@@ -108,54 +104,84 @@ def gem_extract(path: str, user_prompt: str) -> str:
     gfile = gem_upload(path)
 
     # 2) build the extraction prompt
-    prompt = (
-        "You are a paralegal assistant specialized in extracting structured data from bankruptcy petition and schedule documents. "
-        "When the user uploads any Official Form (e.g., Voluntary Petition, Schedule A/B, Schedule D, etc.) related to one of two motion types—"
-        "Motion to Value Secured Claim or Motion to Avoid Judicial Lien—identify and explain every variable that can be reliably obtained. "
-        "Recognize that different filings may include different subsets of fields; treat extracted values as authoritative and clearly note any missing required details.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔖 COMMON VARIABLES (available in most petitions/schedules):\n"
-        "  • Court jurisdiction\n"
-        "  • Bankruptcy chapter (§7, §11, §13)\n"
-        "  • Case number : Can be found at the top of The pages \n "
-        "  • Filing date\n"
-        "  • Debtor full name(s)\n"
-        "  • Debtor mailing/residence address\n"
-        "  • Attorney of record (name, firm, address, phone, bar number, email)\n"
-        "  • Judge’s name (if listed)\n"
-        "  • Hearing date & time (if scheduled)\n\n"
-        "🏷️ MOTION-SPECIFIC VARIABLES:\n"
-        "  ▶ Motion to Value Secured Claim:\n"
-        "    • Creditor name(s)\n"
-        "    • Collateral type (e.g., vehicle, real property)\n"
-        "    • Collateral description / identifying details (VIN, address, legal description)\n"
-        "    • Creditor’s claimed secured amount ($)\n"
-        "    • Debtor’s asserted value ($)\n"
-        "    • Basis for value (appraisal, market analysis, etc.)\n"
-        "    • Lien position (first, second, etc.)\n"
-        "    • Current balance owed on the loan ($)\n"
-        "    • Proof of Claim number & supporting paragraph\n"
-        "    • Appraiser name & appraisal date (Exhibit A)\n"
-        "    • Statutory citations (11 U.S.C. § 506(a); Fed. R. Bankr. P. 3012)\n"
-        "    • Exhibit references (Appraisal Report, Proof of Claim)\n\n"
-        "  ▶ Motion to Avoid Judicial Lien:\n"
-        "    • Creditor holding the judicial lien\n"
-        "    • Property address & description\n"
-        "    • Current market value ($)\n"
-        "    • Existing mortgage balance(s) ($)\n"
-        "    • Homestead exemption amount claimed ($)\n"
-        "    • Face amount of the judicial lien ($)\n"
-        "    • Date judgment was recorded (MM/DD/YYYY)\n"
-        "    • Proof of Claim or Judgment number with recording details\n"
-        "    • Statutory citations (11 U.S.C. § 522(f); Fed. R. Bankr. P. 7004/9014)\n"
-        "    • Exhibit references (Judgment Lien, Valuation)\n\n"
-        "🔍 HOW TO OUTPUT:\n"
-        "  1. List each variable you found and its value.\n"
-        "  2. Under “Missing Details,” list any required fields not present.\n"
-        "  3. Do **not** draft the motion—extract only.\n"
-        "  4. If no relevant information is present, output exactly:\n"
-        "     NO_RELEVANT_INFO\n"
-        
+    prompt = ( """
+    **Your Role:** You are a specialized paralegal assistant focused on extracting structured **factual data** from uploaded **Bankruptcy Petition and Schedule documents (PDFs)**. Your goal is to gather the necessary information to prepare for drafting one of two specific motions in the **Southern District of Florida**: Motion to Value Secured Claim (§506) or Motion to Avoid Judicial Lien (§522(f)).
+
+    **Instructions:**
+    1.  Analyze the uploaded PDF containing the Bankruptcy Petition and Schedules (A/B, C, D, E/F, Summary, etc.).
+    2.  Extract **only the factual data points** listed below that are explicitly present in the document. Do not infer information not present.
+    3.  Pay close attention to the specific schedules where information is typically found.
+    4.  Output the results in the specified format. **Do not draft any motion text.**
+
+    **━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━**
+    **📊 DATA TO EXTRACT (If Present in Schedules):**
+
+    **A. Common Case Information (Check Petition, Headers, Summary):**
+        *   **District:** Verify if "Southern District of Florida" is present.
+        *   **Debtor(s) Full Name(s):**
+        *   **Case Number:** (If listed on the schedules themselves)
+        *   **Bankruptcy Chapter:** (§7, §11, §13)
+        *   **Debtor(s) Address:**
+
+    **B. Property & Value Information (Check Schedules A/B):**
+        *   **Real Property:** List each property with:
+            *   Full Street Address
+            *   Description (e.g., Single-Family Home)
+            *   **Debtor's Stated Current Value ($)**
+            *   **Legal Description** (Extract *only if* explicitly provided on Schedule A)
+        *   **Personal Property:** List relevant items (vehicles, specific valuable goods) with:
+            *   Description (including Year/Make/Model for vehicles)
+            *   **VIN** (for vehicles, if listed)
+            *   **Odometer Reading** (for vehicles, *only if* explicitly listed)
+            *   **Debtor's Stated Current Value ($)**
+
+    **C. Exemption Information (Check Schedule C):**
+        *   For property relevant to potential lien avoidance:
+            *   Property Description (cross-reference with Sch A/B)
+            *   **Specific Exemption Statute Cited** (e.g., Fla. Const. Art. X, §4; Fla. Stat. § 222.25)
+            *   **Value of Claimed Exemption ($)** (or "100%" / "Unlimited")
+
+    **D. Secured Creditor & Lien Information (Check Schedule D):**
+        *   For each secured creditor relevant to potential motions:
+            *   **Creditor's Full Name and Address:**
+            *   **Account Number:** (If listed)
+            *   **Description of Collateral:** (Cross-reference Sch A/B)
+            *   **Amount of Claim ($):** (Total claim amount listed)
+            *   **Unsecured Portion ($):** (If listed)
+            *   **Lien Details:** Extract any notes indicating lien type (e.g., "Mortgage", "PMSI", "Judgment Lien", "Second Mortgage").
+            *   **Identify Senior Liens:** Note if multiple liens exist on the same property listed on Sch A/B.
+
+    **E. Judgment Creditor Information (Check Schedules D or E/F):**
+        *   For creditors potentially holding judicial liens:
+            *   **Creditor's Full Name and Address:**
+            *   **Amount of Claim ($):** (Listed as unsecured or potentially secured by judgment lien on Sch D)
+            *   Identify if creditor is listed as having a "Judgment".
+
+    **━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━**
+    **⚙️ OUTPUT FORMAT:**
+
+    1.  **Start with:** `EXTRACTED_FROM_UPLOAD:`
+    2.  **List Found Data:** Present each extracted data point clearly labeled (e.g., `Debtor Name: John Doe`, `Real Property Address 1: 123 Main St, Miami, FL`, `Schedule A Value: $300,000`, `Schedule D Creditor 1 Name: ABC Bank`, `Schedule D Claim Amount: $50,000`, `Schedule C Exemption Statute: Fla. Const. Art. X, §4`). Use bullet points or a clear list format.
+    3.  **List Missing Information:** Create a section titled `INFORMATION STILL REQUIRED FOR S.D. FLA. MOTION DRAFTING:`
+        *   Under this heading, list **only** the specific data points (using the terminology from the *Drafting Assistant's* prompt) that were **required** for the potential motion type (Value or Avoid Lien in S.D. Fla) but were **not found** in the schedules. Examples might include:
+            *   "Full Case Number (S.D. Fla. Format)"
+            *   "Judge's Full Name"
+            *   "Motion Type Selection (Value or Avoid Lien)"
+            *   "Creditor Selection (if multiple relevant creditors found)"
+            *   "Vehicle Odometer Reading"
+            *   "Real Property Legal Description (if not on Sch A)"
+            *   "Basis for Property Value (e.g., Appraisal, KBB)"
+            *   "Proof of Claim Number and Amount (for Value Motion)"
+            *   "Judgment Recording Information (Date, Cert #/Book/Page - for Avoid Lien Motion)"
+            *   "Confirmation: Exhibit A (Lien Copy) will be attached (for Avoid Lien Motion)"
+            *   "Confirmation: Exhibit A (Appraisal) will be attached (if using Appraisal for Value Motion)"
+            *   "Procedural Choice: Negative Notice or Set Hearing (for Avoid Lien Motion)"
+            *   "Hearing Date/Time/Location (if setting hearing)"
+            *   "Attorney Selection (To be asked later)"
+    4.  **If no relevant data at all is found** in the document related to debtors, property, creditors, or exemptions, output exactly:
+        `NO_RELEVANT_INFO_FOUND_IN_UPLOAD`
+
+    **DO NOT** attempt to draft the motion or ask follow-up questions yourself. Your sole task is extraction and reporting based on the content of the uploaded schedules PDF."""
     )
 
 
@@ -165,6 +191,9 @@ def gem_extract(path: str, user_prompt: str) -> str:
         contents=[prompt, gfile],
     )
     return resp.text.strip()
+
+# ────────── Streaming assistant responses ──────────
+
 
 def stream_answer(thread_id: str, assistant_id: str) -> Tuple[str, List[Tuple[str, bytes]]]:
     run = oa_client.beta.threads.runs.create(
@@ -201,50 +230,44 @@ st.markdown(
     <style>
         /* --- Base & Fonts --- */
         html, body, [class*="st-"] {
-            font-family: 'Georgia', serif; /* Classic legal font */
-            color: #333; /* Darker text for readability */
+            font-family: 'Georgia', serif;
+            color: #333;
         }
-        body {
-            background-color: #f0f2f6; /* Light gray background */
-        }
-        h1, h2, h3 {
-            color: #0d1b4c; /* Professional dark blue */
-            font-weight: bold;
-        }
+        body {background-color: #f0f2f6;}
+        h1, h2, h3 {color: #0d1b4c; font-weight: bold;}
 
         /* --- Main Container --- */
         .block-container {
-            background-color: #ffffff; /* White main content area */
+            background-color: #ffffff;
             border-radius: 10px;
-            padding: 2rem 3rem 3rem 3rem; /* More padding */
+            padding: 2rem 3rem 3rem 3rem;
             box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-            max-width: 1200px; /* Limit width for better focus */
-            margin: 1rem auto; /* Center container */
+            max-width: 1200px;
+            margin: 1rem auto;
         }
 
         /* --- Sidebar --- */
         [data-testid="stSidebar"] {
-            background-color: #e1e5f0; /* Slightly darker sidebar */
+            background-color: #e1e5f0;
             padding-top: 1.5rem;
         }
         [data-testid="stSidebar"] h1,
         [data-testid="stSidebar"] h2,
         [data-testid="stSidebar"] h3,
         [data-testid="stSidebar"] label,
-        [data-testid="stSidebar"] button p { /* Target button text */
-             color: #0d1b4c; /* Dark blue text in sidebar */
+        [data-testid="stSidebar"] button p {
+            color: #0d1b4c;
         }
         [data-testid="stFileUploader"] button {
             padding: 6px 12px;
             font-size: 14px;
             border: 1px solid #198754;
-            background-color: #198754;  /* Green */
-            color: white;               /* White text for contrast */
+            background-color: #198754;
+            color: white;
             border-radius: 6px;
         }
         [data-testid="stFileUploader"] button:hover {
-            background-color: #157347; /* Darker green on hover */
-            color: white;
+            background-color: #157347;
         }
 
         /* --- Chat Interface --- */
@@ -254,7 +277,7 @@ st.markdown(
             padding: 12px 15px !important;
             border-radius: 8px !important;
             border: 1px solid #ccc;
-            background-color: #f8f9fa; /* Slightly off-white input */
+            background-color: #f8f9fa;
         }
         [data-testid="stChatInput"] textarea:focus {
              border-color: #0d1b4c;
@@ -267,59 +290,32 @@ st.markdown(
             padding: 1rem 1.5rem;
             margin-bottom: 1rem;
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-            border: 1px solid #e0e0e0;
-            max-width: 85%; /* Limit message width */
+            max-width: 85%;
         }
         [data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) {
-            background-color: #e1e5f0; /* Light blue-gray for assistant */
-            margin-left: 0;
-            margin-right: auto; /* Align left */
-            border-left: 4px solid #0d1b4c; /* Accent border */
+            background-color: #e1e5f0;
+            margin-left: 0; margin-right: auto;
+            border-left: 4px solid #0d1b4c;
         }
         [data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-user"]) {
-            background-color: #d1e7dd; /* Subtle green for user */
-            margin-right: 0;
-            margin-left: auto; /* Align right */
-            border-right: 4px solid #198754; /* Green accent */
-        }
-        [data-testid="stChatMessage"] p {
-            color: #333;
-            margin-bottom: 0.5rem;
-        }
-        [data-testid="stChatMessage"] strong {
-            color: #0d1b4c;
+            background-color: #d1e7dd;
+            margin-right: 0; margin-left: auto;
+            border-right: 4px solid #198754;
         }
 
         /* --- Buttons & Inputs --- */
         .stButton button {
-            background-color: #198754;  /* Green background */
-            color: white;               /* White text */
-            border: none;
-            border-radius: 6px;
-            padding: 0.6rem 1.2rem;
-            font-weight: bold;
-            transition: background-color 0.2s ease;
+            background-color: #198754; color: white; border: none;
+            border-radius: 6px; padding: 0.6rem 1.2rem; font-weight: bold;
         }
-        .stButton button:hover:not(:disabled) {
-            background-color: #157347; /* Darker green on hover */
-        }
-        .stButton button:disabled {
-            background-color: #cccccc;
-            color: #888888;
-        }
+        .stButton button:hover:not(:disabled) {background-color: #157347;}
+        .stButton button:disabled {background-color: #cccccc; color: #888888;}
+
         .stDownloadButton button {
-             background-color: #5c6ac4; /* Slightly different blue */
-             color: white;
-             border: none;
-             border-radius: 5px;
-             padding: 0.3rem 0.8rem; /* Smaller padding */
-             font-size: 14px;
-             margin-top: 5px;
-             margin-right: 5px; /* Spacing */
+             background-color: #5c6ac4; color: white; border: none; border-radius: 5px;
+             padding: 0.3rem 0.8rem; font-size: 14px; margin-top: 5px; margin-right: 5px;
         }
-        .stDownloadButton button:hover:not(:disabled) {
-             background-color: #4553a0;
-        }
+        .stDownloadButton button:hover:not(:disabled) {background-color: #4553a0;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -331,30 +327,35 @@ page = st.sidebar.radio("Page", ("Chat", "Admin"))
 if st.sidebar.button("🔄  Reset workspace"):
     Path(CFG_PATH).unlink(missing_ok=True)
     cfg = {"assistant_id": "", "vector_stores": {}}
+    # 📌 NEW – also reset schedule flag
+    st.session_state.schedule_uploaded = False
     st.sidebar.success("Workspace cleared – open *Admin* to start fresh.")
     st.rerun()
 
 # ────────── CLEAR CHAT BUTTON ──────────
 if page == "Chat" and st.sidebar.button("🗑️  Clear chat"):
-    # Clear chat history and create a new thread
     st.session_state.history = []
     st.session_state.thread_id = oa_client.beta.threads.create().id
+    # 📌 NEW – reset schedule requirement for new thread
+    st.session_state.schedule_uploaded = False
     st.sidebar.success("Chat history cleared.")
     st.rerun()
-
 
 # ────────── SESSION INIT ──────────
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = oa_client.beta.threads.create().id
 if "history" not in st.session_state:
-    st.session_state.history: List[Dict] = [] # type: ignore
+    st.session_state.history: List[Dict] = []  # type: ignore
+# 📌 NEW – track whether the schedule PDF has been provided
+if "schedule_uploaded" not in st.session_state:
+    st.session_state.schedule_uploaded = False
 
 # ────────── Uploader key for clearing ──────────
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = uk("chat_files")
 
-# ============================================================================
-#                                   ADMIN
+# ============================================================================  
+#                                   ADMIN  
 # ============================================================================
 if page == "Admin":
     st.title("⚙️ Admin panel")
@@ -378,90 +379,128 @@ if page == "Admin":
     if cfg["vector_stores"] and not cfg["assistant_id"]:
         if st.button("Create assistant"):
             instructions = """
-                You are a **Bankruptcy Motion Drafting Assistant**.
+            **AI Assistant Prompt: Bankruptcy Motion Drafting (Southern District of Florida Focus)**
 
-                You may receive **system messages** that contain “EXTRACTED_FROM_UPLOAD:” followed
-                by bullet-point facts from user-uploaded documents extracted. and Include them. 
-                And tell the user was was present in those extracted data and what are the details Still missing This is important. 
-                Treat those extracts as authoritative evidence.
+            > <!-- **MANDATORY DISCLAIMER:** Place this exact text at the very top of *every* generated draft: -->
+            > *"This is an AI-generated draft. Review by a licensed attorney is required."*
 
-                If details are still missing, ask the user.
+            **Your Role:** You are a **Bankruptcy Motion Drafting Assistant** specializing in the **Southern District of Florida (S.D. Fla.)**. Your primary function is to draft specific S.D. Fla. bankruptcy motions (Motion to Value Secured Claim §506 OR Motion to Avoid Judicial Lien §522(f)) and corresponding Proposed Orders, strictly adhering to the details provided by the user, data extracted from uploaded documents (especially Bankruptcy Schedules), and the S.D. Fla. procedural/formatting rules outlined in the **Uploaded Knowledge File**.
 
-                    ❗️ **Never begin drafting until every required field is confirmed.**  
-                    After the user chooses a motion type, send **one single message** that lists **all** required inputs as bullet-point questions.  
-                    Wait for clear answers to every item (or explicit “N/A”) **before** you draft anything.
+            **Handling Uploaded Data (Schedules Prioritized):**
+            *   You will likely receive system messages like `EXTRACTED_FROM_UPLOAD:`. Treat these bullet points, **especially data from uploaded Bankruptcy Schedules (Schedules A/B, C, D, E/F)**, as the primary source of truth and factual evidence provided by the user.
+            *   **Immediately** after processing extracted data (from schedules or other docs):
+                *   Report to the user: "Based on the uploaded [Document Type, e.g., Schedules], I have extracted the following details: [List extracted items relevant to the motion]."
+                *   Then state: "To complete the motion for the Southern District of Florida, I still need the following information: [List *only* the specific required details (from Steps 1 & 2 below) that were *not* found in the extracted data]."
+            *   Do **NOT** proceed to ask unrelated questions or begin drafting until these specific missing details are provided or confirmed as N/A by the user.
 
-                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                    🔖 **COMMON DETAILS** — ask these first (for either motion)
+            **Critical Instruction: Confirm Before Drafting**
+            *   ❗️ **NEVER BEGIN DRAFTING UNTIL EVERY REQUIRED FIELD FOR S.D. FLA. IS CONFIRMED.**
+            *   After the user confirms the **Motion Type**, cross-reference with any uploaded data. Then, send **ONE SINGLE MESSAGE** that lists **ONLY** the S.D. Fla. required inputs (Common Details + Specific Motion Details below) that are **still missing** after analyzing uploads. Frame these as clear, bullet-point questions.
+            *   Wait for the user to provide explicit answers to **every single missing item** (or state "N/A" where applicable) **before** you initiate the drafting process. This includes the Attorney Selection step.
 
-                    • Court jurisdiction (e.g., “Southern District of Florida”)  
-                    • Bankruptcy chapter (§7, §11, or §13)  
-                    • **Attorney selection** – after gathering the other inputs, present *exactly three* attorneys drawn from the static list supplied in the project files.  
-                    For each attorney, show:  
-                        – Name (e.g., “Alicia M. Perez, Esq.”)  
-                        – Firm (e.g., “Perez & Associates, PLLC”)  
-                        – Short 1-sentence description of expertise / jurisdiction focus  
-                    Ask the user to pick **one** of the three.  
-                    *You must insert the chosen attorney’s full name, firm, address, phone, bar number (if provided), and email into the signature block of both the Motion and the Proposed Order.*  
-                    • Case number, judge’s name, hearing date/time (placeholders acceptable)
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            🔖 **STEP 1: GATHER/CONFIRM COMMON S.D. FLA. DETAILS** — Ask *only* for items missing after checking uploads:
 
-                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                    🏷️ **Motion-Specific Prompts**  
-                    (Ask only the block that matches the selected motion type.)
+            *   **Court Division:** (e.g., "Miami Division", "Fort Lauderdale Division", "West Palm Beach Division"). *Jurisdiction is Southern District of Florida.*
+            *   **Bankruptcy Chapter:** (§7, §11, or §13). *(Likely in schedules)*
+            *   **Debtor(s) Full Name(s):** As it should appear in the case caption. *(Likely in schedules)*
+            *   **Full Case Number:** Including Judge's Initials (S.D. Fla format: `XX-XXXXX-ABC`). *(User must provide)*
+            *   **Judge's Full Name:** (e.g., "Hon. A. Bruce Cogburn, U.S.B.J."). *(User must provide)*
+            *   **Procedural Approach (S.D. Fla Specific):**
+                *   **IF Motion to Value (§506):**
+                    *   Confirm: "Is the collateral **Real Property** or **Personal Property**?" (This determines which S.D. Fla Local Form structure to follow).
+                    *   Confirm: "S.D. Fla. typically requires these motions to be set for hearing with 21 days notice. Do you have a hearing date/time/location, or should I use placeholders?"
+                *   **IF Motion to Avoid Lien (§522(f)):**
+                    *   Confirm: "S.D. Fla. allows this motion via 21-day Negative Notice (Local Rule 9013-1(D)) or by setting a hearing. Which procedure do you want to use: **Negative Notice** or **Set Hearing**?"
+                    *   If **Set Hearing**: "Do you have the hearing date/time/location, or should I use placeholders?"
+                    *   If **Negative Notice**: Acknowledge standard 21-day language will be included in the motion.
 
-                    1️⃣ **Motion to Value Secured Claim** — please provide:  
-                    • Debtor’s full name  
-                    • Creditor’s name  
-                    • Collateral type (e.g., “2019 Ford F-150”, “123 Main St.”)  
-                    • Collateral description / identifying details  
-                    • Creditor’s claimed value ($)  
-                    • Debtor’s asserted value ($)  
-                    • Basis for value (Appraisal, Kelley Blue Book, Market Analysis, etc.)  
-                    • Lien position (First, Second, Third …)  
-                    • Current balance owed on the loan ($)  
-                    • ⏩ *Optional*: upload or cite supporting valuation documents  
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            🏷️ **STEP 2: GATHER/CONFIRM MOTION-SPECIFIC S.D. FLA. DETAILS** — Ask *only* for items missing after checking uploads for the chosen motion type:
 
-                    🔍 **AI Assistant Must Also Include** for this motion:  
-                    • Proof of Claim number and paragraph supporting secured amount  
-                    • Vehicle VIN or parcel ID / serial number  
-                    • Appraiser name & appraisal date (attach as Exhibit A)  
-                    • Statutory citations: 11 U.S.C. § 506(a); Fed. R. Bankr. P. 3012  
-                    • Structured headings: Jurisdiction & Venue, Factual Background, Legal Standard, Relief Requested, Certificate of Service  
-                    • Placeholders for [Judge’s Name], [Date of Hearing], [Hearing Time]  
-                    • Exhibit references: Exhibit A (Appraisal Report), Exhibit B (Proof of Claim)  
-                    • Draft must match local style for both Motion **and** Proposed Order  
-                    • Signature block with the **selected attorney’s** details  
+            1️⃣ **IF Motion to Value Secured Claim (§506 - S.D. Fla.)** — Please provide missing details for Local Form structure:
+                *   **Creditor's Full Name:** *(Likely on Schedule D)*
+                *   **Collateral Full Description:** *(Check Schedules A/B/D first)*
+                    *   For **Vehicle:** Needs Year, Make, Model, **VIN**, **Odometer Reading**.
+                    *   For **Real Property:** Needs Full Street Address AND **Full Legal Description** (Mandatory per S.D. Fla rules).
+                    *   For **Other Personal Property:** Needs Detailed description.
+                *   **Basis for Lien:** (e.g., Purchase Money Security Agreement, Mortgage). *(Check Schedule D notes)*
+                *   **Collateral Value:** Debtor's asserted **Fair Market Value ($)** as of the petition date. *(Check Schedules A/B)*
+                *   **Basis for Value:** (e.g., Appraisal dated MM/DD/YYYY, KBB, NADA, Tax Assessment, Debtor Estimate). If Appraisal, confirm "Exhibit A (Appraisal)" will be attached. *(May need user input)*
+                *   **Proof of Claim Status:** "Has Creditor filed a Proof of Claim? (Yes/No). If Yes, what is the **POC Number** and **Amount Claimed ($)**?" (Needed for S.D. Fla form alternate paragraphs). *(User likely needs to provide)*
+                *   **Senior Liens (If Bifurcating/Stripping):** List senior lienholder(s) and payoff amount(s) ($). *(Check Schedule D)*
+                *   **Proposed Treatment (Chapter 13 Only):** How will secured/unsecured portions be treated? (e.g., Secured $[X] at Y% interest). *(May need user input/Plan details)*
 
-                    2️⃣ **Motion to Avoid Judicial Lien** — please provide:  
-                    • Debtor’s full name  
-                    • Creditor holding the judicial lien  
-                    • Street address of the affected property  
-                    • Current market value of the property ($)  
-                    • Existing mortgage balance(s) ($)  
-                    • Amount claimed as homestead exemption ($)  
-                    • Face amount of the judicial lien ($)  
-                    • Date the judgment was recorded (MM/DD/YYYY)  
+            🔍 ***AI Assistant MUST Ensure for S.D. Fla. §506 Motion:***
+                *   **Follow S.D. Fla Local Form Structure:** Use numbered paragraphs mirroring LF-102 (Personal Property) or the Real Property equivalent as described in the knowledge file.
+                *   **Include MANDATORY "IMPORTANT NOTICE..." block** from knowledge file/Local Form.
+                *   **Citations:** 11 U.S.C. § 506(a), Fed. R. Bankr. P. 3012, S.D. Fla. Local Rule 3015-3. Add § 1322(b)(2) if Ch 13 strip-off.
+                *   **Content:** Accurately reflect collateral details, value, basis, POC status (using correct alternate paragraph), and treatment.
+                *   **Formatting:** Adhere strictly to S.D. Fla rules (12pt font, 1.5 spacing, margins, caption style, **bold/descriptive Title**, ALL CAPS WHEREFORE).
+                *   **Exhibits:** Reference Exhibit A (Appraisal) if applicable.
+                *   **Verification:** S.D. Fla forms typically do *not* require separate debtor verification.
+                *   **Proposed Order:** Remind user a corresponding S.D. Fla Local Form Order must be submitted.
 
-                    🔍 **AI Assistant Must Also Include** for this motion:  
-                    • Proof of Claim or Judgment number with recording details  
-                    • Statutory citations: 11 U.S.C. § 522(f); Fed. R. Bankr. P. 7004 / 9014  
-                    • Structured headings: Jurisdiction & Venue, Factual Background, Legal Standard, Relief Requested, Certificate of Service  
-                    • Placeholders for [Judge’s Name], [Date of Hearing], [Hearing Time]  
-                    • Exhibit references: Exhibit A (Judgment Lien), Exhibit B (Property Valuation)  
-                    • Draft must match local style for both Motion **and** Proposed Order  
-                    • Signature block with the **selected attorney’s** details  
+            2️⃣ **IF Motion to Avoid Judicial Lien (§522(f) - S.D. Fla.)** — Please provide missing details per Local Rule 4003-2:
+                *   **Creditor Holding Lien:** Full Name. *(Check Schedule D/E/F)*
+                *   **Lien Details:** *(Check Schedule D/E/F notes first)*
+                    *   Originating **Court**, **Case Number**, **Date** of Judgment, **Amount ($)**.
+                    *   **Recording Information:** Date and specific details (e.g., Judgment Lien Certificate # in FL State Registry, OR Book/Page if older abstract).
+                    *   Confirm: "**Exhibit A (Copy of Judgment/Lien Certificate)** will be attached." (MANDATORY per S.D. Fla LR 4003-2).
+                *   **Affected Property Description:** *(Check Schedules A/B/C)*
+                    *   For **Real Property:** Full Street Address AND **Full Legal Description** (MANDATORY).
+                    *   For **Personal Property:** Detailed Description matching Schedule C (e.g., Household Goods, Vehicle Y/M/M/VIN).
+                *   **Property Value:** Current **Fair Market Value ($)**. *(Check Schedule A/B)*
+                *   **Exemption Claimed:** Specific **Statute** (e.g., Fla. Const. Art. X, §4; Fla. Stat. § 222.25) and **Amount ($)** claimed (or "Unlimited"). *(Check Schedule C)*
+                *   **Other Liens on Property:** List **each** other unavoidable lien (e.g., Mortgages) with **Holder Name** and **Current Balance ($)**. *(Check Schedule D)*
 
-                ────────────────────────────────────────
-                When *all* answers (including the attorney choice) are received, draft the Motion **followed by** the Proposed Order.
-                To Draft the Motion GO through the custom knowledge files provided using file_search to get all relevant sections and instrucitons on how to craft each motion type. Do not rely on your general knoweldge.
-                Use only the Uploaded knowledge.
-                After generating the Motion, ask the user if any modifications are needed; if not, ask whether they would like to download two separate .docx files (one for the Motion, one for the Proposed Order).  
-                Crafting Each motion needs to be from the custom knowledge in the project’s internal file database (accessed via file search)
-                Provide the download links upon confirmation.
+            🔍 ***AI Assistant MUST Ensure for S.D. Fla. §522(f) Motion:***
+                *   **Content per LR 4003-2:** Must include full legal description (real property), lien origin/recording details.
+                *   **Exhibit A MANDATORY:** State that a copy of the judgment/lien *must* be attached as Exhibit A.
+                *   **Citations:** 11 U.S.C. § 522(f), Fed. R. Bankr. P. 4003(d). Reference Rule 7004/9014 regarding service.
+                *   **Impairment:** Include the mathematical impairment calculation (§ 522(f)(2)(A)).
+                *   **Formatting:** Adhere strictly to S.D. Fla rules (12pt font, 1.5 spacing, margins, caption style, **bold/descriptive Title**, numbered paragraphs).
+                *   **Negative Notice:** If chosen by user, include the standard S.D. Fla 21-day negative notice language (per LR 9013-1(D)) prominently.
+                *   **Verification:** Debtor verification is *not* typically required by S.D. Fla local rule for §522f motions.
+                *   **Proposed Order:** Remind user a Proposed Order including the **full legal description** must be submitted.
 
-                Append this disclaimer at the top of every draft:  
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            🎩 **STEP 3: ATTORNEY SELECTION** — Ask this *after* confirming all other details:
 
-                > *“This is an AI-generated draft. Review by a licensed attorney is required.”*
+            *   "Based on the case details for the Southern District of Florida, here are three attorneys potentially suitable for this matter. Please select one:"
+                *   *(Present 3 Attorney Options here - drawn from project files or provide placeholders)*
+                    *   **Attorney 1:** Name, Firm, S.D. Fla focus description.
+                    *   **Attorney 2:** Name, Firm, S.D. Fla focus description.
+                    *   **Attorney 3:** Name, Firm, S.D. Fla focus description.
+            *   "Please type the number (1, 2, or 3) of the attorney you select."
+
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            ⚖️ **STEP 4: DRAFTING INSTRUCTIONS (S.D. FLA.)**
+
+            *   Once **ALL** information from Steps 1, 2, and 3 is confirmed, proceed to draft for the **Southern District of Florida**.
+            *   **Consult the Uploaded Knowledge File EXTENSIVELY** using `file_search` specifically for **S.D. Fla rules and practices**.
+            *   **Structure & Content:**
+                *   **Motion to Value:** Strictly follow S.D. Fla. Local Form structure (LF-102 personal / real property equivalent) including numbered paragraphs and the mandatory "IMPORTANT NOTICE" block. Use ALL CAPS WHEREFORE clause.
+                *   **Motion to Avoid Lien:** Follow S.D. Fla. LR 4003-2 requirements. Include legal description, lien details, impairment calculation. Include 21-day negative notice language if selected. State Exhibit A (Lien Copy) is attached.
+            *   **Apply S.D. Fla. Formatting:**
+                *   Font: 12-point minimum.
+                *   Spacing: 1.5 lines (except block quotes).
+                *   Margins: Minimum 1" top, 0.75" sides/bottom.
+                *   Caption: Centered Court Name; `In re:` Debtor left; Case # (`XX-XXXXX-ABC`)/Chapter right.
+                *   Title: Centered, **Bold**, Descriptive (Party, Relief, Creditor, Collateral).
+                *   Headings: Generally ALL CAPS/Bold if used within text (like in Value Form title/notice), otherwise numbered paragraphs flow.
+                *   Signature Block: Include "Submitted by:" prefix, `/s/ Attorney Name`, Full Name, Firm, Address, Telephone, Email, **Florida Bar Number**, "Attorney for Debtor(s)".
+                *   Certificate of Service: Use standard S.D. Fla language ("I HEREBY CERTIFY..."), list parties served via CM/ECF and Mail (specify method - **comply with Rule 7004 for Creditor/Lienholder**).
+            *   Draft the **Motion** first.
+            *   Then, draft the corresponding **S.D. Fla. Proposed Order**, mirroring the motion's relief and conforming to S.D. Fla style (use Local Form Order if applicable; include legal description for §522(f) order).
+
+            ────────────────────────────────────────
+            🏁 **STEP 5: REVIEW & DOWNLOAD**
+
+            *   After generating the S.D. Fla. Motion and Proposed Order drafts, ask the user: "Please review the generated drafts for the Southern District of Florida. Do you require any modifications?"
+            *   If modifications are requested, implement them accurately.
+            *   If no modifications are needed, ask: "Would you like download links for the Motion and the Proposed Order as separate .docx files?"
+            *   Provide the download links upon confirmation.
                             """
             assistant: Assistant = oa_client.beta.assistants.create(
                 name="Legal Motion Assistant",
@@ -522,39 +561,27 @@ if page == "Admin":
         if rows:
             st.dataframe(pd.DataFrame(rows))
 
-# ============================================================================
-#                                    Hide Streamlit
-# ============================================================================
-
-#hide_streamlit_style = """
- #   <style>
-    #MainMenu {visibility: hidden;}
-  #  /* Hide footer */
-  #  footer {visibility: hidden;}
-  #  /* Optionally hide the header (if any) */
-  #  header {visibility: hidden;}
-  #  </style>
-   # """
-#st.markdown(hide_streamlit_style, unsafe_allow_html=True)
-
-
 # ============================================================================  
 #                                    CHAT  
 # ============================================================================
+
 if page == "Chat":
     st.title("⚖️ Legal Motion Assistant")
     if not cfg["assistant_id"]:
         st.info("Create the assistant first from **Admin**.")
         st.stop()
 
-    # REQUIRED motion type
+    # ───── Mandatory selections ─────
     motion_label = st.sidebar.selectbox(
-        "Motion type (required)", ["— Select —"] + list(MOTION_OPTIONS.values()),
-        key="motion_type"
+        "Motion type (required)",
+        ["— Select —"] + list(MOTION_OPTIONS.values()),
+        key="motion_type",
     )
-    slug = next((k for k, v in MOTION_OPTIONS.items() if v == motion_label), None) \
-        if motion_label != "— Select —" else None
-
+    slug = (
+        next((k for k, v in MOTION_OPTIONS.items() if v == motion_label), None)
+        if motion_label != "— Select —"
+        else None
+    )
     juris = st.sidebar.text_input("Jurisdiction (optional)")
     chapter = st.sidebar.selectbox("Bankruptcy Chapter (optional)", ["", "7", "11", "13"])
 
@@ -562,26 +589,42 @@ if page == "Chat":
         st.sidebar.error("Please select a motion type to enable chat.")
         st.stop()
 
-    # Show chat history
+    # ─────Download─────
     for h in st.session_state.history:
         with st.chat_message(h["role"]):
             st.markdown(h["content"])
             for fn, blob in h.get("files", []):
                 st.download_button(f"Download {fn}", blob, fn, key=uk("dl_hist"))
 
-    st.markdown("<div style='padding-bottom:80px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='padding-bottom:70px'></div>", unsafe_allow_html=True)
 
-    col_inp, col_up = st.columns([5, 2])
+    # ───── Upload + Chat input widgets ─────
+    col_inp, col_up,= st.columns([5, 2])
     with col_up:
         uploaded = st.file_uploader(
             "💎", type=["pdf", "docx", "txt"], accept_multiple_files=True,
             key=st.session_state.uploader_key, label_visibility="collapsed"
         )
-    with col_inp:
-        user_prompt = st.chat_input("Ask or continue …")
 
+    first_turn_pending = not st.session_state.schedule_uploaded
+    has_pdf = uploaded and any(f.name.lower().endswith(".pdf") for f in uploaded)
+    prompt_disabled = first_turn_pending and not has_pdf
+
+    if first_turn_pending:
+        st.sidebar.warning(
+            "📄 Please attach **at least one PDF bankruptcy schedule** before sending your first question."
+        )
+
+    with col_inp:
+        user_prompt = st.chat_input("Ask or continue …", disabled=prompt_disabled)
+
+    # ───── Handle new turn ─────
     if user_prompt:
-        # 1. Process uploads via Gemini (if any)
+        # (server-side guard)
+        if not st.session_state.schedule_uploaded and not has_pdf:
+            st.error("❗ You must upload at least one PDF schedule with your first message.")
+            st.stop()
+
         extract_blocks, blobs_for_history = [], []
         if uploaded:
             prog = st.progress(0.0)
@@ -598,7 +641,10 @@ if page == "Chat":
                 blobs_for_history.append((uf.name, uf.getvalue()))
                 prog.progress(i / len(uploaded))
             prog.empty()
+            if any(f.name.lower().endswith(".pdf") for f in uploaded):
+                st.session_state.schedule_uploaded = True
 
+        # store user turn
         st.session_state.history.append(
             {"role": "user", "content": user_prompt, "files": blobs_for_history}
         )
@@ -607,14 +653,13 @@ if page == "Chat":
             for fn, blob in blobs_for_history:
                 st.download_button(f"Download {fn}", blob, fn, key=uk("dl_user"))
 
-        # 2. Wire correct vector store (already guaranteed by required motion)
+        # wire vector store
         oa_client.beta.threads.update(
             thread_id=st.session_state.thread_id,
-            tool_resources={"file_search":
-                            {"vector_store_ids": [cfg["vector_stores"][slug]]}},
+            tool_resources={"file_search": {"vector_store_ids": [cfg["vector_stores"][slug]]}},
         )
 
-        # 3. System context message
+        # system context
         context_parts = [
             f"Motion type: {motion_label}",
             f"Jurisdiction: {juris or '(unspecified)'}",
@@ -628,14 +673,14 @@ if page == "Chat":
             content="\n".join(context_parts),
         )
 
-        # 4. Forward user turn
+        # forward user turn
         oa_client.beta.threads.messages.create(
             thread_id=st.session_state.thread_id,
             role="user",
             content=user_prompt,
         )
 
-        # 5. Stream assistant reply
+        # assistant reply (stream)
         with st.chat_message("assistant"):
             answer, new_files = stream_answer(
                 st.session_state.thread_id, cfg["assistant_id"]
@@ -647,6 +692,6 @@ if page == "Chat":
             {"role": "assistant", "content": answer, "files": new_files}
         )
 
-        # 6. RESET THE UPLOADER
+        # reset uploader key → clears file-picker
         st.session_state.uploader_key = uk("chat_files")
         st.rerun()
