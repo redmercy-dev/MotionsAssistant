@@ -457,24 +457,33 @@ st.markdown(
     }
 
     /* Chat Message Styling */
-    [data-testid="stChatMessage"] {
+    .stChatMessage {
         border-radius: 10px;
         padding: 1rem 1.5rem;
         margin-bottom: 1rem;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        max-width: 85%;
     }
-    [data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) {
-        background-color: #e1e5f0;
-        margin-left: 0;
-        margin-right: auto;
+    
+    /* Assistant messages */
+    [data-testid="stChatMessageContent"] {
+        background-color: transparent;
+    }
+    
+    div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+        background-color: #e1e5f0 !important;
         border-left: 4px solid #0d1b4c;
     }
-    [data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-user"]) {
-        background-color: #d1e7dd;
-        margin-right: 0;
-        margin-left: auto;
+    
+    /* User messages */
+    div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        background-color: #d1e7dd !important;
         border-right: 4px solid #198754;
+    }
+    
+    /* Avatar styling */
+    [data-testid="chatAvatarIcon-user"],
+    [data-testid="chatAvatarIcon-assistant"] {
+        background-color: transparent !important;
     }
 
     /* --- Buttons & Inputs --- */
