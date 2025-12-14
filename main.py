@@ -38,6 +38,7 @@ def save_cfg(c: Dict):
 cfg = load_cfg()
 openai_api_key = st.secrets["api_keys"]["openai_api_key"]
 gemini_api_key = st.secrets["api_keys"]["gemini_api_key"]
+pdfco_api_key = "rabaoui.y@yahoo.com_9UXOxs3tqiTFbFKzaHaldrDCdopeYjGCW9z3DjMlsOiceP4kducGj524npIwQf06"
 
 # ────────── OPENAI CLIENT (Responses API) ──────────
 client = OpenAI(api_key=openai_api_key)
@@ -190,6 +191,13 @@ SYSTEM_INSTRUCTIONS = """
 
 **Your Role:** You are a **Bankruptcy Motion Drafting Assistant** specializing in the **Southern District of Florida (S.D. Fla.)**. Your primary function is to draft specific S.D. Fla. bankruptcy motions (Motion to Value Secured Claim §506 OR Motion to Avoid Judicial Lien §522(f)) and corresponding Proposed Orders, strictly adhering to the details provided by the user, data extracted from uploaded documents (especially Bankruptcy Schedules), and the S.D. Fla. procedural/formatting rules outlined in the **Uploaded Knowledge File**.
 
+**IMPORTANT: PDF Generation Capability**
+You have access to a `convert_html_to_pdf` function that converts HTML to PDF format. When you finish drafting a motion or order:
+1. Format the document as clean, well-structured HTML with inline CSS styles
+2. Use the `convert_html_to_pdf` function to generate a downloadable PDF
+3. Provide the user with the PDF download link
+4. This allows users to get professional PDF documents instead of just text or .docx files
+
 **Handling Uploaded Data (Schedules Prioritized):**
 * You will likely receive system messages like EXTRACTED_FROM_UPLOAD:. Treat these bullet points, **especially data from uploaded Bankruptcy Schedules (Schedules A/B, C, D, E/F)**, as the primary source of truth and factual evidence provided by the user.
 * **Immediately** after processing extracted data (from schedules or other docs):
@@ -339,7 +347,102 @@ SYSTEM_INSTRUCTIONS = """
 13. **Footer Reference:** Local Forms display a small footer such as "LF-103 (06/14/10) Page 1 of 2."—this is ordinarily inserted automatically. Simply ensure your draft leaves adequate room at the page bottom and does not overwrite any auto-footer.
 """
 
-def download_container_file(container_id: str, file_id: str, filename: str) -> Tuple[str, bytes]:
+def convert_html_to_pdf(html_content: str, filename: str = "document.pdf") -> Dict:
+    """
+    Convert HTML content to PDF using PDF.co API.
+    
+    Args:
+        html_content: HTML string to convert
+        filename: Desired output filename
+    
+    Returns:
+        Dict with 'success', 'url', 'filename', 'error' keys
+    """
+    try:
+        url = "https://api.pdf.co/v1/pdf/convert/from/html"
+        headers = {
+            "x-api-key": pdfco_api_key,
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "html": html_content,
+            "name": filename,
+            "papersize": "Letter",
+            "orientation": "Portrait",
+            "margins": "40px 20px 20px 20px",
+            "printbackground": True,
+            "mediatype": "print"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        if result.get("error") is False and result.get("url"):
+            return {
+                "success": True,
+                "url": result["url"],
+                "filename": filename,
+                "error": None
+            }
+        else:
+            return {
+                "success": False,
+                "url": None,
+                "filename": filename,
+                "error": result.get("message", "Unknown error")
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "url": None,
+            "filename": filename,
+            "error": str(e)
+        }
+
+# ────────── FUNCTION DEFINITION FOR MODEL ──────────
+HTML_TO_PDF_FUNCTION = {
+    "type": "function",
+    "function": {
+        "name": "convert_html_to_pdf",
+        "description": "Convert HTML content to PDF format. Use this when the user requests a PDF version of a document, or when you need to provide a downloadable PDF file. This is particularly useful for generating legal motions, orders, and other formal documents that need to be in PDF format.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "html_content": {
+                    "type": "string",
+                    "description": "The complete HTML content to convert to PDF. Should include proper HTML structure with <!DOCTYPE html>, <html>, <head>, and <body> tags. Use inline CSS for styling."
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "The desired filename for the PDF output (e.g., 'Motion_to_Value.pdf')"
+                }
+            },
+            "required": ["html_content", "filename"]
+        }
+    }
+}
+
+def handle_function_call(function_name: str, function_args: Dict) -> Dict:
+    """
+    Handle function calls from the model.
+    
+    Args:
+        function_name: Name of the function to call
+        function_args: Arguments for the function
+    
+    Returns:
+        Result of the function call
+    """
+    if function_name == "convert_html_to_pdf":
+        return convert_html_to_pdf(
+            html_content=function_args.get("html_content", ""),
+            filename=function_args.get("filename", "document.pdf")
+        )
+    else:
+        return {"success": False, "error": f"Unknown function: {function_name}"}
     """
     Download a file from a code interpreter container.
     
@@ -397,7 +500,7 @@ def stream_response_with_file_search(
     motion_context: str
 ) -> Tuple[str, List[Tuple[str, bytes]]]:
     """
-    Stream a response using Responses API with file_search and code_interpreter tools.
+    Stream a response using Responses API with file_search, code_interpreter, and custom function tools.
     
     Args:
         conversation_history: List of message items (user/assistant)
@@ -416,7 +519,7 @@ def stream_response_with_file_search(
     # Add conversation history
     input_items.extend(conversation_history)
     
-    # Create response with file_search and code_interpreter tools
+    # Create response with file_search, code_interpreter, and function tools
     try:
         # First, create streaming response
         stream_response = client.responses.create(
@@ -430,7 +533,8 @@ def stream_response_with_file_search(
                 {
                     "type": "code_interpreter",
                     "container": {"type": "auto"}
-                }
+                },
+                HTML_TO_PDF_FUNCTION
             ],
             stream=True,
         )
@@ -439,6 +543,7 @@ def stream_response_with_file_search(
         holder = st.empty()
         full_text = ""
         response_id = None
+        function_calls = []
         
         for event in stream_response:
             if hasattr(event, 'type'):
@@ -449,9 +554,38 @@ def stream_response_with_file_search(
                 elif event.type == "response.created":
                     if hasattr(event, 'response') and hasattr(event.response, 'id'):
                         response_id = event.response.id
+                elif event.type == "response.function_call_arguments.done":
+                    # Function call completed
+                    if hasattr(event, 'function_call'):
+                        function_calls.append(event.function_call)
         
-        # Now retrieve the complete response to get file annotations
         files_to_download = []
+        
+        # Handle function calls (HTML to PDF conversions)
+        if function_calls:
+            for fc in function_calls:
+                if hasattr(fc, 'name') and fc.name == "convert_html_to_pdf":
+                    import json
+                    args = json.loads(fc.arguments) if isinstance(fc.arguments, str) else fc.arguments
+                    
+                    with st.spinner(f"Converting {args.get('filename', 'document')} to PDF..."):
+                        result = handle_function_call("convert_html_to_pdf", args)
+                        
+                        if result.get("success") and result.get("url"):
+                            # Download the PDF from PDF.co
+                            pdf_response = requests.get(result["url"], timeout=60)
+                            pdf_response.raise_for_status()
+                            files_to_download.append((result["filename"], pdf_response.content))
+                            
+                            # Add info to the display
+                            full_text += f"\n\n✅ **PDF Generated:** {result['filename']}"
+                            holder.markdown(full_text)
+                        else:
+                            error_msg = result.get("error", "Unknown error")
+                            full_text += f"\n\n⚠️ **PDF Conversion Failed:** {error_msg}"
+                            holder.markdown(full_text)
+        
+        # Download files from code interpreter containers if any
         if response_id:
             try:
                 complete_response = client.responses.retrieve(response_id)
@@ -473,6 +607,8 @@ def stream_response_with_file_search(
         
     except Exception as e:
         st.error(f"Error creating response: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return "", []
 
 # ────────── STREAMLIT UI STYLES ──────────
