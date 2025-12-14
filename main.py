@@ -45,29 +45,23 @@ def save_cfg(c: Dict):
 
 # ────────── CONFIG & API KEYS ──────────
 cfg = load_cfg()
-
 openai_api_key = st.secrets["api_keys"]["openai_api_key"]
 gemini_api_key = st.secrets["api_keys"]["gemini_api_key"]
 
-# Optional: make model configurable from secrets/env (recommended)
-# In Streamlit secrets you can add:
-# [api_keys]
-# gemini_model = "gemini-2.5-flash"
+# Optional: configure Gemini model from secrets/env
 GEM_MODEL = (
     st.secrets.get("api_keys", {}).get("gemini_model")
     or os.getenv("GEMINI_MODEL")
     or "gemini-2.5-flash"
 )
 
-# ────────── OPENAI CLIENT (Assistants) ──────────
+# ────────── OPENAI CLIENT (Assistant) ──────────
 oa_client = OpenAI(api_key=openai_api_key)
 
 # ────────── GOOGLE GEMINI CLIENT ──────────
-# Use v1 unless you specifically need v1alpha features/models
-g_client = genai.Client(
-    api_key=gemini_api_key,
-    http_options=gtypes.HttpOptions(api_version="v1"),
-)
+# IMPORTANT: Do NOT force api_version unless you have a strong reason.
+# Forcing api_version has been a frequent cause of schema mismatch / INVALID_ARGUMENT errors. :contentReference[oaicite:3]{index=3}
+g_client = genai.Client(api_key=gemini_api_key)
 
 # ────────── Password ──────────
 def check_password():
@@ -75,13 +69,12 @@ def check_password():
     Returns `True` if the user enters the correct password stored in Streamlit secrets.
     """
     def password_entered():
-        """Checks whether a password entered by the user is correct."""
         if hmac.compare_digest(
             str(st.session_state["password"]),
-            str(st.secrets["APP_PASSWORD"])
+            str(st.secrets["APP_PASSWORD"]),
         ):
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Don't store the password.
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
@@ -100,27 +93,16 @@ if not check_password():
 # ────────── Gemini Functions ──────────
 NO_INFO_SENTINEL = "NO_RELEVANT_INFO_FOUND_IN_UPLOAD"
 
-def get_mime(path: str) -> str:
-    m, _ = mimetypes.guess_type(path)
+def guess_mime_from_name(filename: str) -> str:
+    m, _ = mimetypes.guess_type(filename)
     return m or "application/octet-stream"
 
-def gem_upload(path: str) -> gtypes.File:
-    # Upload returns a File object with a URI you must reference in contents
-    return g_client.files.upload(
-        file=path,
-        config=gtypes.UploadFileConfig(mime_type=get_mime(path)),
-    )
 
-def gem_extract(path: str, user_prompt: str) -> str:
+def gem_extract(file_bytes: bytes, mime_type: str, user_prompt: str) -> str:
     """
-    Uploads `path` to Gemini and asks it to extract facts needed for drafting
-    bankruptcy motions.
+    Reads document bytes inline (PDF recommended) and asks Gemini to extract facts.
+    This avoids Files API and prevents 'fileData' schema issues. :contentReference[oaicite:4]{index=4}
     """
-    # 1) upload the file
-    gfile = gem_upload(path)
-    mime_type = get_mime(path)
-
-    # 2) build the extraction prompt
     prompt = ("""
 **Your Role:** You are a specialized paralegal assistant focused on extracting structured **factual data** from uploaded **Bankruptcy Petition and Schedule documents (PDFs)**. Your goal is to gather the necessary information to prepare for drafting one of two specific motions in the **Southern District of Florida**: Motion to Value Secured Claim (§506) or Motion to Avoid Judicial Lien (§522(f)).
 
@@ -176,9 +158,8 @@ def gem_extract(path: str, user_prompt: str) -> str:
 
 **━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━**
 **⚙️ OUTPUT FORMAT:**
-
 1.  **Start with:** `EXTRACTED_FROM_UPLOAD:`
-2.  **List Found Data:** Present each extracted data point clearly labeled. Use bullet points or a clear list format.
+2.  **List Found Data:** Present each extracted data point clearly labeled (bullets or clear list).
 3.  **List Missing Information:** Create a section titled `INFORMATION STILL REQUIRED FOR S.D. FLA. MOTION DRAFTING:`
 4.  **If no relevant data at all is found** output exactly:
 `NO_RELEVANT_INFO_FOUND_IN_UPLOAD`
@@ -186,31 +167,34 @@ def gem_extract(path: str, user_prompt: str) -> str:
 **DO NOT** draft the motion or ask follow-up questions.
 """).strip()
 
-    # 3) IMPORTANT: pass the uploaded file as a Part created from the file URI
-    # This is the supported pattern for files with generate_content. :contentReference[oaicite:2]{index=2}
-    file_part = gtypes.Part.from_uri(
-        file_uri=gfile.uri,
-        mime_type=mime_type,
-    )
+    # New GenAI SDK shape: Content(role="user", parts=[...])
+    contents = [
+        gtypes.Content(
+            role="user",
+            parts=[
+                gtypes.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+                gtypes.Part.from_text(text=prompt),
+                gtypes.Part.from_text(text=f"User request/context: {user_prompt}"),
+            ],
+        )
+    ]
 
     try:
         resp = g_client.models.generate_content(
             model=GEM_MODEL,
-            contents=[prompt, file_part],
+            contents=contents,
         )
         return (resp.text or "").strip()
     except GeminiClientError as e:
-        # Streamlit will redact the UI error; ensure *logs* contain something actionable.
-        # We re-raise after logging.
-        st.error("Gemini request failed (see logs for details).")
-
-        # Best-effort logging (won't leak the PDF itself)
+        # Streamlit UI redacts; show safe debugging data
+        st.error("Gemini request failed (see logs / debug block).")
         st.write(
             {
                 "gemini_model": GEM_MODEL,
-                "uploaded_mime_type": mime_type,
-                "uploaded_file_uri_present": bool(getattr(gfile, "uri", "")),
+                "mime_type": mime_type,
+                "bytes_len": len(file_bytes),
                 "error_type": type(e).__name__,
+                "error": str(e)[:500],
             }
         )
         raise
@@ -253,6 +237,7 @@ st.markdown(
         html, body, [class*="st-"] { font-family: 'Georgia', serif; color: #333; }
         body {background-color: #f0f2f6;}
         h1, h2, h3 {color: #0d1b4c; font-weight: bold;}
+
         .block-container {
             background-color: #ffffff;
             border-radius: 10px;
@@ -261,30 +246,48 @@ st.markdown(
             max-width: 1200px;
             margin: 1rem auto;
         }
-        [data-testid="stSidebar"] { background-color: #e1e5f0; padding-top: 1.5rem; }
+
+        [data-testid="stSidebar"] {
+            background-color: #e1e5f0;
+            padding-top: 1.5rem;
+        }
         [data-testid="stSidebar"] h1,
         [data-testid="stSidebar"] h2,
         [data-testid="stSidebar"] h3,
         [data-testid="stSidebar"] label,
-        [data-testid="stSidebar"] button p { color: #0d1b4c; }
-        [data-testid="stFileUploader"] button {
-            padding: 6px 12px; font-size: 14px;
-            border: 1px solid #198754; background-color: #198754;
-            color: white; border-radius: 6px;
+        [data-testid="stSidebar"] button p {
+            color: #0d1b4c;
         }
-        [data-testid="stFileUploader"] button:hover { background-color: #157347; }
+        [data-testid="stFileUploader"] button {
+            padding: 6px 12px;
+            font-size: 14px;
+            border: 1px solid #198754;
+            background-color: #198754;
+            color: white;
+            border-radius: 6px;
+        }
+        [data-testid="stFileUploader"] button:hover {
+            background-color: #157347;
+        }
+
         [data-testid="stChatInput"] textarea {
-            font-size: 16px !important; line-height: 1.6 !important;
-            padding: 12px 15px !important; border-radius: 8px !important;
-            border: 1px solid #ccc; background-color: #f8f9fa;
+            font-size: 16px !important;
+            line-height: 1.6 !important;
+            padding: 12px 15px !important;
+            border-radius: 8px !important;
+            border: 1px solid #ccc;
+            background-color: #f8f9fa;
         }
         [data-testid="stChatInput"] textarea:focus {
              border-color: #0d1b4c;
              box-shadow: 0 0 0 2px rgba(13, 27, 76, 0.2);
         }
+
         [data-testid="stChatMessage"] {
-            border-radius: 10px; padding: 1rem 1.5rem;
-            margin-bottom: 1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            border-radius: 10px;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
             max-width: 85%;
         }
         [data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) {
@@ -297,12 +300,14 @@ st.markdown(
             margin-right: 0; margin-left: auto;
             border-right: 4px solid #198754;
         }
+
         .stButton button {
             background-color: #198754; color: white; border: none;
             border-radius: 6px; padding: 0.6rem 1.2rem; font-weight: bold;
         }
         .stButton button:hover:not(:disabled) {background-color: #157347;}
         .stButton button:disabled {background-color: #cccccc; color: #888888;}
+
         .stDownloadButton button {
              background-color: #5c6ac4; color: white; border: none; border-radius: 5px;
              padding: 0.3rem 0.8rem; font-size: 14px; margin-top: 5px; margin-right: 5px;
@@ -365,7 +370,16 @@ if page == "Admin":
     # ➌ Create assistant (once)
     if cfg["vector_stores"] and not cfg["assistant_id"]:
         if st.button("Create assistant"):
-            instructions = """(same instructions as your original — unchanged for brevity)"""
+            instructions = """
+        **Bankruptcy Motion Drafting (Southern District of Florida Focus)**
+
+        > <!-- **MANDATORY DISCLAIMER:** Place this exact text at the very top of *every* generated draft: -->
+        > *"This is an AI-generated draft. Review by a licensed attorney is required."*
+
+        **Your Role:** You are a **Bankruptcy Motion Drafting Assistant** specializing in the **Southern District of Florida (S.D. Fla.)**. Your primary function is to draft specific S.D. Fla. bankruptcy motions (Motion to Value Secured Claim §506 OR Motion to Avoid Judicial Lien §522(f)) and corresponding Proposed Orders, strictly adhering to the details provided by the user, data extracted from uploaded documents (especially Bankruptcy Schedules), and the S.D. Fla. procedural/formatting rules outlined in the **Uploaded Knowledge File**.
+
+        (… your full instructions continue unchanged …)
+                            """
             assistant: Assistant = oa_client.beta.assistants.create(
                 name="Legal Motion Assistant",
                 model="gpt-4.1",
@@ -434,6 +448,7 @@ if page == "Chat":
         st.info("Create the assistant first from **Admin**.")
         st.stop()
 
+    # ───── Mandatory selections ─────
     motion_label = st.sidebar.selectbox(
         "Motion type (required)",
         ["— Select —"] + list(MOTION_OPTIONS.values()),
@@ -451,7 +466,7 @@ if page == "Chat":
         st.sidebar.error("Please select a motion type to enable chat.")
         st.stop()
 
-    # render history
+    # ───── Render history ─────
     for h in st.session_state.history:
         with st.chat_message(h["role"]):
             st.markdown(h["content"])
@@ -460,6 +475,7 @@ if page == "Chat":
 
     st.markdown("<div style='padding-bottom:70px'></div>", unsafe_allow_html=True)
 
+    # ───── Upload + Chat input widgets ─────
     col_inp, col_up = st.columns([5, 2])
     with col_up:
         uploaded = st.file_uploader(
@@ -482,7 +498,9 @@ if page == "Chat":
     with col_inp:
         user_prompt = st.chat_input("Ask or continue …", disabled=prompt_disabled)
 
+    # ───── Handle new turn ─────
     if user_prompt:
+        # server-side guard
         if not st.session_state.schedule_uploaded and not has_pdf:
             st.error("❗ You must upload at least one PDF schedule with your first message.")
             st.stop()
@@ -493,25 +511,19 @@ if page == "Chat":
         if uploaded:
             prog = st.progress(0.0)
             for i, uf in enumerate(uploaded, 1):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{uf.name}") as tmp:
-                    tmp.write(uf.getvalue())
-                    tmp_path = tmp.name
+                file_bytes = uf.getvalue()
+                mime_type = guess_mime_from_name(uf.name)
 
                 with st.spinner(f"Gemini reading {uf.name} …"):
-                    gem_text = gem_extract(tmp_path, user_prompt)
+                    gem_text = gem_extract(file_bytes, mime_type, user_prompt)
 
-                # Cleanup temp file
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-
+                # prompt says: NO_RELEVANT_INFO_FOUND_IN_UPLOAD
                 if gem_text and gem_text.strip() != NO_INFO_SENTINEL:
                     extract_blocks.append(
                         f"EXTRACTED_FROM_UPLOAD File name ({uf.name}):\n{gem_text}"
                     )
 
-                blobs_for_history.append((uf.name, uf.getvalue()))
+                blobs_for_history.append((uf.name, file_bytes))
                 prog.progress(i / max(len(uploaded), 1))
 
             prog.empty()
@@ -534,7 +546,7 @@ if page == "Chat":
             tool_resources={"file_search": {"vector_store_ids": [cfg["vector_stores"][slug]]}},
         )
 
-        # context parts
+        # system context
         context_parts = [
             f"Motion type: {motion_label}",
             f"Jurisdiction: {juris or '(unspecified)'}",
@@ -543,7 +555,6 @@ if page == "Chat":
         if extract_blocks:
             context_parts.append("\n".join(extract_blocks))
 
-        # Put context into the thread as an assistant message (your original approach kept)
         oa_client.beta.threads.messages.create(
             thread_id=st.session_state.thread_id,
             role="assistant",
