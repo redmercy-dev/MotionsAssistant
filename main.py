@@ -2,6 +2,7 @@ import json, mimetypes, os, tempfile, uuid
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 import hmac
+
 import requests
 import pandas as pd
 import streamlit as st
@@ -60,7 +61,6 @@ def check_password():
     Returns True if the user enters the correct password stored in Streamlit secrets.
     """
     def password_entered():
-        """Checks whether a password entered by the user is correct."""
         if hmac.compare_digest(str(st.session_state["password"]), str(st.secrets["APP_PASSWORD"])):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -91,10 +91,11 @@ def gem_extract(path: str, user_prompt: str) -> str:
     """
     Uploads path to Gemini and asks it to extract facts needed for drafting bankruptcy motions.
     """
+    _ = user_prompt
     gfile = gem_upload(path)
 
     # (Shortened per your instruction)
-    prompt = """Your Role: You are a specialized paralegal assistant focused on extracting structured factual data from uploaded Bankruptcy Petition and Schedule documents (PDFs)."""
+    prompt = "You are a specialized paralegal assistant focused on extracting structured factual data from uploaded Bankruptcy Petition and Schedule documents (PDFs)."
 
     contents = [
         gtypes.Content(
@@ -113,7 +114,7 @@ def gem_extract(path: str, user_prompt: str) -> str:
 
 # ────────── SYSTEM INSTRUCTIONS ──────────
 # (Shortened per your instruction)
-SYSTEM_INSTRUCTIONS = """Bankruptcy Motion Drafting (Southern District of Florida Focus)."""
+SYSTEM_INSTRUCTIONS = "Bankruptcy Motion Drafting (Southern District of Florida Focus)."
 
 # ────────── OpenAI Container File Download Helpers ──────────
 def download_container_file(container_id: str, file_id: str, filename: str) -> Tuple[str, bytes]:
@@ -148,10 +149,6 @@ def _as_list(x: Any) -> List[Any]:
 def _content_to_text(content_obj: Any) -> str:
     """
     Convert a 'content' field from file_search results into displayable text.
-    Handles shapes like:
-      - {"type":"text","text":"..."}
-      - [{"type":"text","text":"..."}, ...]
-      - {"text":"..."} or "..."
     """
     if content_obj is None:
         return ""
@@ -159,11 +156,9 @@ def _content_to_text(content_obj: Any) -> str:
         return content_obj.strip()
 
     if isinstance(content_obj, dict):
-        # common: {"type":"text","text":"..."}
         t = _get(content_obj, "text")
         if isinstance(t, str) and t.strip():
             return t.strip()
-        # sometimes nested
         parts = _get(content_obj, "content") or _get(content_obj, "parts")
         return _content_to_text(parts)
 
@@ -179,7 +174,6 @@ def _content_to_text(content_obj: Any) -> str:
                 if isinstance(t, str) and t.strip():
                     texts.append(t.strip())
                 else:
-                    # e.g. {"type":"text","text": "..."}
                     maybe = item.get("text")
                     if isinstance(maybe, str) and maybe.strip():
                         texts.append(maybe.strip())
@@ -187,7 +181,7 @@ def _content_to_text(content_obj: Any) -> str:
 
     return str(content_obj).strip()
 
-# ────────── NEW: Extract container file outputs + retrieved chunks ──────────
+# ────────── Extract container file outputs + retrieved chunks ──────────
 def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[Dict]]:
     """
     Returns:
@@ -219,7 +213,6 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
         if _get(output_item, "type") != "file_search_call":
             continue
 
-        # The docs call it "results" when included. Some SDKs may name it "search_results".
         results = _get(output_item, "results")
         if results is None:
             results = _get(output_item, "search_results")
@@ -228,7 +221,6 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
             file_id = _get(r, "file_id") or _get(r, "file")
             filename = _get(r, "filename")
 
-            # Best-effort filename lookup if missing
             if not filename and file_id:
                 try:
                     fobj = client.files.retrieve(file_id)
@@ -236,7 +228,6 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
                 except Exception:
                     filename = "Unknown file"
 
-            # Extract the chunk text
             text = (
                 _get(r, "text")
                 or _get(r, "chunk")
@@ -251,10 +242,13 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
                 "score": _get(r, "score"),
                 "rank": _get(r, "rank"),
             }
-            # Only keep meaningful entries
             if chunk["text"].strip():
                 chunks.append(chunk)
 
+    container_files = [
+        fa for fa in container_files
+        if fa.get("container_id") and fa.get("file_id") and fa.get("filename")
+    ]
     return container_files, chunks
 
 def _retrieve_response_with_include(response_id: str):
@@ -267,7 +261,6 @@ def _retrieve_response_with_include(response_id: str):
     except TypeError:
         return client.responses.retrieve(response_id)
     except Exception:
-        # fallback anyway
         return client.responses.retrieve(response_id)
 
 def stream_response_with_file_search(
@@ -295,7 +288,6 @@ def stream_response_with_file_search(
                 {"type": "file_search", "vector_store_ids": vector_store_ids},
                 {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
-            # ✅ This is the key to get the actual retrieved chunks back
             include=["file_search_call.results"],
             stream=True,
         )
@@ -348,10 +340,56 @@ st.set_page_config("Legal Motion Assistant", layout="wide")
 st.markdown(
     """
     <style>
-    html, body, [class*="st-"] { font-family: 'Georgia', serif; color: #333; }
-    body { background-color: #f0f2f6; }
-    h1, h2, h3 { color: #0d1b4c; font-weight: bold; }
+    /* ------------------------------------------------------------------
+       IMPORTANT FIX:
+       Your previous global font rule applied to ALL Streamlit elements,
+       which breaks Material Symbols (icons become visible as text like
+       "smart_toy", "face", "keyboard_arrow_down").
+       We keep your typography, but force icon spans back to Material font.
+    ------------------------------------------------------------------ */
 
+    /* --- Base & Fonts --- */
+    html, body, [class*="st-"] {
+        font-family: 'Georgia', serif;
+        color: #333;
+    }
+    body {background-color: #f0f2f6;}
+    h1, h2, h3 {color: #0d1b4c; font-weight: bold;}
+
+    /* --- FORCE Material Symbols to render as icons (NOT text) --- */
+    .material-symbols-rounded,
+    .material-symbols-outlined,
+    .material-icons,
+    span.material-symbols-rounded,
+    span.material-symbols-outlined,
+    i.material-icons,
+    [data-testid^="chatAvatarIcon-"] span,
+    [data-testid="stExpander"] summary span {
+        font-family: "Material Symbols Rounded" !important;
+        font-weight: normal !important;
+        font-style: normal !important;
+        line-height: 1 !important;
+        letter-spacing: normal !important;
+        text-transform: none !important;
+        display: inline-block !important;
+        white-space: nowrap !important;
+        direction: ltr !important;
+        -webkit-font-feature-settings: "liga" !important;
+        -webkit-font-smoothing: antialiased !important;
+        font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24 !important;
+    }
+
+    /* --- Make expander header layout clean so it never overlays text --- */
+    [data-testid="stExpander"] summary {
+        display: flex !important;
+        align-items: center !important;
+        gap: 0.35rem !important;
+    }
+    [data-testid="stExpander"] summary span {
+        flex: 0 0 auto !important;
+    }
+
+    /* --- Main Container --- */
     .block-container {
         background-color: #ffffff;
         border-radius: 10px;
@@ -361,10 +399,15 @@ st.markdown(
         margin: 1rem auto;
     }
 
-    [data-testid="stSidebar"] { background-color: #e1e5f0; padding-top: 1.5rem; }
+    /* --- Sidebar --- */
+    [data-testid="stSidebar"] {
+        background-color: #e1e5f0;
+        padding-top: 1.5rem;
+    }
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] label, [data-testid="stSidebar"] button p { color: #0d1b4c; }
-
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] button p {
+        color: #0d1b4c;
+    }
     [data-testid="stFileUploader"] button {
         padding: 6px 12px;
         font-size: 14px;
@@ -373,8 +416,11 @@ st.markdown(
         color: white;
         border-radius: 6px;
     }
-    [data-testid="stFileUploader"] button:hover { background-color: #157347; }
+    [data-testid="stFileUploader"] button:hover {
+        background-color: #157347;
+    }
 
+    /* --- Chat Interface --- */
     [data-testid="stChatInput"] textarea {
         font-size: 16px !important;
         line-height: 1.6 !important;
@@ -388,6 +434,7 @@ st.markdown(
         box-shadow: 0 0 0 2px rgba(13, 27, 76, 0.2);
     }
 
+    /* Chat Message Styling */
     .stChatMessage {
         border-radius: 10px;
         padding: 1rem 1.5rem;
@@ -395,15 +442,29 @@ st.markdown(
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
 
+    /* Assistant messages */
+    [data-testid="stChatMessageContent"] {
+        background-color: transparent;
+    }
+
     div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
         background-color: #e1e5f0 !important;
         border-left: 4px solid #0d1b4c;
     }
+
+    /* User messages */
     div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
         background-color: #d1e7dd !important;
         border-right: 4px solid #198754;
     }
 
+    /* Avatar styling */
+    [data-testid="chatAvatarIcon-user"],
+    [data-testid="chatAvatarIcon-assistant"] {
+        background-color: transparent !important;
+    }
+
+    /* --- Buttons & Inputs --- */
     .stButton button {
         background-color: #198754;
         color: white;
@@ -412,9 +473,8 @@ st.markdown(
         padding: 0.6rem 1.2rem;
         font-weight: bold;
     }
-    .stButton button:hover:not(:disabled) { background-color: #157347; }
-    .stButton button:disabled { background-color: #cccccc; color: #888888; }
-
+    .stButton button:hover:not(:disabled) {background-color: #157347;}
+    .stButton button:disabled {background-color: #cccccc; color: #888888;}
     .stDownloadButton button {
         background-color: #5c6ac4;
         color: white;
@@ -425,7 +485,7 @@ st.markdown(
         margin-top: 5px;
         margin-right: 5px;
     }
-    .stDownloadButton button:hover:not(:disabled) { background-color: #4553a0; }
+    .stDownloadButton button:hover:not(:disabled) {background-color: #4553a0;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -456,18 +516,16 @@ if "schedule_uploaded" not in st.session_state:
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = uk("chat_files")
 
-# =====================================================================
+# ============================================================================
 # ADMIN
-# =====================================================================
+# ============================================================================
 if page == "Admin":
     st.title("⚙️ Admin panel")
 
     # ➊ Create two vector stores
     if len(cfg["vector_stores"]) < 2 and st.button("Create 2 vector stores"):
         for slug in MOTION_OPTIONS:
-            cfg["vector_stores"][slug] = client.vector_stores.create(
-                name=f"{slug}_store"
-            ).id
+            cfg["vector_stores"][slug] = client.vector_stores.create(name=f"{slug}_store").id
         save_cfg(cfg)
         st.success("Vector stores created.")
 
@@ -492,9 +550,7 @@ if page == "Admin":
                     st.error("Provide jurisdiction & select PDF(s).")
                 else:
                     if slug not in cfg["vector_stores"]:
-                        cfg["vector_stores"][slug] = client.vector_stores.create(
-                            name=f"{slug}_store"
-                        ).id
+                        cfg["vector_stores"][slug] = client.vector_stores.create(name=f"{slug}_store").id
                         save_cfg(cfg)
 
                     with st.spinner("Uploading & indexing …"):
@@ -511,14 +567,17 @@ if page == "Admin":
         rows = []
         for slug, vsid in cfg["vector_stores"].items():
             try:
-                vs_files = client.vector_stores.files.list(vsid, limit=100)
-                for vf in vs_files:
-                    try:
-                        file_obj = client.files.retrieve(vf.id)
-                        fname = file_obj.filename
-                    except Exception:
-                        fname = "(unknown)"
-
+                vs_files = client.vector_stores.files.list(vector_store_id=vsid, limit=100)
+                items = getattr(vs_files, "data", None) or vs_files
+                for vf in items:
+                    file_id = getattr(vf, "file_id", None) or getattr(vf, "id", None)
+                    fname = "(unknown)"
+                    if file_id:
+                        try:
+                            file_obj = client.files.retrieve(file_id)
+                            fname = getattr(file_obj, "filename", None) or fname
+                        except Exception:
+                            pass
                     rows.append({
                         "Motion": MOTION_OPTIONS.get(slug, slug),
                         "Filename": fname,
@@ -530,9 +589,9 @@ if page == "Admin":
         if rows:
             st.dataframe(pd.DataFrame(rows))
 
-# =====================================================================
+# ============================================================================
 # CHAT
-# =====================================================================
+# ============================================================================
 if page == "Chat":
     st.title("⚖️ Legal Motion Assistant")
 
@@ -561,13 +620,13 @@ if page == "Chat":
 
     # ───── DISPLAY HISTORY ─────
     for h in st.session_state.history:
-        with st.chat_message(h["role"]):
+        avatar = "🙂" if h["role"] == "user" else "🤖"
+        with st.chat_message(h["role"], avatar=avatar):
             st.markdown(h["content"])
 
             for fn, blob in h.get("files", []):
                 st.download_button(f"Download {fn}", blob, fn, key=uk("dl_hist"))
 
-            # ✅ Show retrieved chunks (from file_search_call.results)
             chunks = h.get("citations", [])
             if chunks and h["role"] == "assistant":
                 with st.expander(f"📚 View {len(chunks)} retrieved reference chunk(s)", expanded=False):
@@ -614,12 +673,16 @@ if page == "Chat":
                 with st.spinner(f"Gemini reading {uf.name} …"):
                     gem_text = gem_extract(tmp_path, user_prompt)
                     if gem_text and gem_text not in ("NO_RELEVANT_INFO", "NO_RELEVANT_INFO_FOUND_IN_UPLOAD"):
-                        extract_blocks.append(
-                            f"EXTRACTED_FROM_UPLOAD File name ({uf.name}):\n{gem_text}"
-                        )
+                        extract_blocks.append(f"EXTRACTED_FROM_UPLOAD File name ({uf.name}):\n{gem_text}")
                     blobs_for_history.append((uf.name, uf.getvalue()))
 
                 prog.progress(i / len(uploaded))
+
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
             prog.empty()
 
             if any(f.name.lower().endswith(".pdf") for f in uploaded):
@@ -630,7 +693,7 @@ if page == "Chat":
             {"role": "user", "content": user_prompt, "files": blobs_for_history}
         )
 
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar="🙂"):
             st.markdown(user_prompt)
             for fn, blob in blobs_for_history:
                 st.download_button(f"Download {fn}", blob, fn, key=uk("dl_user"))
@@ -647,10 +710,10 @@ if page == "Chat":
         motion_context = "\n".join(context_parts)
 
         # Prepare conversation for API
-        conversation_history = [{"role": h["role"], "content": h["content"]} for h in st.session_state.history]
+        conversation_history = [{"role": hh["role"], "content": hh["content"]} for hh in st.session_state.history]
 
         # Get response from API
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar="🤖"):
             answer, new_files, chunks = stream_response_with_file_search(
                 conversation_history,
                 [cfg["vector_stores"][slug]],
@@ -660,7 +723,6 @@ if page == "Chat":
             for fn, data in new_files:
                 st.download_button(f"Download {fn}", data, fn, key=uk("dl_asst"))
 
-            # ✅ Display retrieved chunks immediately
             if chunks:
                 with st.expander(f"📚 View {len(chunks)} retrieved reference chunk(s)", expanded=False):
                     for idx, c in enumerate(chunks, 1):
