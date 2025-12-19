@@ -1,14 +1,9 @@
-import json
-import mimetypes
-import os
-import tempfile
-import uuid
+import json, mimetypes, os, tempfile, uuid
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 import hmac
-
-import pandas as pd
 import requests
+import pandas as pd
 import streamlit as st
 from google import genai
 from google.genai import types as gtypes
@@ -60,19 +55,15 @@ g_client = genai.Client(api_key=gemini_api_key)
 GEM_MODEL = "gemini-2.0-flash-exp"
 
 # ────────── Password ──────────
-def check_password() -> bool:
+def check_password():
     """
     Returns True if the user enters the correct password stored in Streamlit secrets.
     """
     def password_entered():
         """Checks whether a password entered by the user is correct."""
-        if hmac.compare_digest(
-            str(st.session_state.get("password", "")),
-            str(st.secrets.get("APP_PASSWORD", "")),
-        ):
+        if hmac.compare_digest(str(st.session_state["password"]), str(st.secrets["APP_PASSWORD"])):
             st.session_state["password_correct"] = True
-            if "password" in st.session_state:
-                del st.session_state["password"]
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
@@ -80,7 +71,7 @@ def check_password() -> bool:
         return True
 
     st.text_input("Password", type="password", on_change=password_entered, key="password")
-    if "password_correct" in st.session_state and not st.session_state.get("password_correct", False):
+    if "password_correct" in st.session_state:
         st.error("😕 Password incorrect")
     return False
 
@@ -100,11 +91,10 @@ def gem_extract(path: str, user_prompt: str) -> str:
     """
     Uploads path to Gemini and asks it to extract facts needed for drafting bankruptcy motions.
     """
-    _ = user_prompt  # kept for future use
     gfile = gem_upload(path)
 
-    # (Prompt shortened per your instruction)
-    prompt = "You are a specialized paralegal assistant focused on extracting structured factual data from uploaded Bankruptcy Petition and Schedule documents (PDFs)."
+    # (Shortened per your instruction)
+    prompt = """Your Role: You are a specialized paralegal assistant focused on extracting structured factual data from uploaded Bankruptcy Petition and Schedule documents (PDFs)."""
 
     contents = [
         gtypes.Content(
@@ -122,20 +112,13 @@ def gem_extract(path: str, user_prompt: str) -> str:
     return (resp.text or "").strip()
 
 # ────────── SYSTEM INSTRUCTIONS ──────────
-# (Prompt shortened per your instruction)
-SYSTEM_INSTRUCTIONS = "You are a Bankruptcy Motion Drafting Assistant specializing in the Southern District of Florida (S.D. Fla.)."
+# (Shortened per your instruction)
+SYSTEM_INSTRUCTIONS = """Bankruptcy Motion Drafting (Southern District of Florida Focus)."""
 
+# ────────── OpenAI Container File Download Helpers ──────────
 def download_container_file(container_id: str, file_id: str, filename: str) -> Tuple[str, bytes]:
     """
     Download a file from a code interpreter container.
-
-    Args:
-        container_id: Container ID (e.g., "cntr_...")
-        file_id: File ID (e.g., "cfile_...")
-        filename: Original filename
-
-    Returns:
-        Tuple of (filename, file_bytes)
     """
     try:
         url = f"https://api.openai.com/v1/containers/{container_id}/files/{file_id}/content"
@@ -147,77 +130,156 @@ def download_container_file(container_id: str, file_id: str, filename: str) -> T
         st.warning(f"Could not download file {filename}: {str(e)}")
         return (filename, b"")
 
-def extract_annotations_from_response(response_obj) -> Tuple[List[Dict], List[Dict]]:
+# ────────── Robust helpers for SDK objects/dicts ──────────
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+def _as_list(x: Any) -> List[Any]:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    return [x]
+
+def _content_to_text(content_obj: Any) -> str:
     """
-    Extract file annotations and citations from a response object.
-
-    Returns tuple of (file_annotations, citations)
-    where citations contain file_citation type with text/quote.
+    Convert a 'content' field from file_search results into displayable text.
+    Handles shapes like:
+      - {"type":"text","text":"..."}
+      - [{"type":"text","text":"..."}, ...]
+      - {"text":"..."} or "..."
     """
-    file_annotations: List[Dict] = []
-    citations: List[Dict] = []
+    if content_obj is None:
+        return ""
+    if isinstance(content_obj, str):
+        return content_obj.strip()
 
-    outputs = getattr(response_obj, "output", None) or []
-    for output_item in outputs:
-        contents = getattr(output_item, "content", None) or []
-        for content in contents:
-            anns = getattr(content, "annotations", None) or []
-            for ann in anns:
-                ann_type = getattr(ann, "type", None)
-                if not ann_type:
-                    continue
+    if isinstance(content_obj, dict):
+        # common: {"type":"text","text":"..."}
+        t = _get(content_obj, "text")
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+        # sometimes nested
+        parts = _get(content_obj, "content") or _get(content_obj, "parts")
+        return _content_to_text(parts)
 
-                if ann_type == "container_file_citation":
-                    file_annotations.append(
+    if isinstance(content_obj, list):
+        texts = []
+        for item in content_obj:
+            if isinstance(item, str):
+                if item.strip():
+                    texts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                t = item.get("text") or item.get("content")
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+                else:
+                    # e.g. {"type":"text","text": "..."}
+                    maybe = item.get("text")
+                    if isinstance(maybe, str) and maybe.strip():
+                        texts.append(maybe.strip())
+        return "\n\n".join([t for t in texts if t]).strip()
+
+    return str(content_obj).strip()
+
+# ────────── NEW: Extract container file outputs + retrieved chunks ──────────
+def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Returns:
+      - container_files: from 'container_file_citation' annotations (code_interpreter outputs)
+      - chunks: from file_search_call.results (actual retrieved passages)
+    """
+    container_files: List[Dict] = []
+    chunks: List[Dict] = []
+
+    output_items = _as_list(_get(response_obj, "output"))
+
+    # 1) Container files (from message annotations)
+    for output_item in output_items:
+        content_list = _as_list(_get(output_item, "content"))
+        for content in content_list:
+            annotations = _as_list(_get(content, "annotations"))
+            for ann in annotations:
+                if _get(ann, "type") == "container_file_citation":
+                    container_files.append(
                         {
-                            "container_id": getattr(ann, "container_id", None),
-                            "file_id": getattr(ann, "file_id", None),
-                            "filename": getattr(ann, "filename", None),
+                            "container_id": _get(ann, "container_id"),
+                            "file_id": _get(ann, "file_id"),
+                            "filename": _get(ann, "filename"),
                         }
                     )
 
-                elif ann_type == "file_citation":
-                    citation_data = {
-                        "file_id": getattr(ann, "file_id", None),
-                        "quote": getattr(ann, "quote", None),
-                        "text": getattr(ann, "text", None),
-                    }
+    # 2) Retrieved chunks (from file_search_call.results) — requires include=["file_search_call.results"]
+    for output_item in output_items:
+        if _get(output_item, "type") != "file_search_call":
+            continue
 
-                    # Try to get filename from file_id (best-effort)
-                    try:
-                        if citation_data["file_id"]:
-                            file_obj = client.files.retrieve(citation_data["file_id"])
-                            citation_data["filename"] = getattr(file_obj, "filename", None) or "Unknown file"
-                        else:
-                            citation_data["filename"] = "Unknown file"
-                    except Exception:
-                        citation_data["filename"] = "Unknown file"
+        # The docs call it "results" when included. Some SDKs may name it "search_results".
+        results = _get(output_item, "results")
+        if results is None:
+            results = _get(output_item, "search_results")
 
-                    citations.append(citation_data)
+        for r in _as_list(results):
+            file_id = _get(r, "file_id") or _get(r, "file")
+            filename = _get(r, "filename")
 
-    # Drop malformed container citations (must have ids)
-    file_annotations = [
-        fa for fa in file_annotations
-        if fa.get("container_id") and fa.get("file_id") and fa.get("filename")
-    ]
+            # Best-effort filename lookup if missing
+            if not filename and file_id:
+                try:
+                    fobj = client.files.retrieve(file_id)
+                    filename = getattr(fobj, "filename", None) or "Unknown file"
+                except Exception:
+                    filename = "Unknown file"
 
-    return file_annotations, citations
+            # Extract the chunk text
+            text = (
+                _get(r, "text")
+                or _get(r, "chunk")
+                or _content_to_text(_get(r, "content"))
+                or _content_to_text(_get(r, "document"))
+            )
+
+            chunk = {
+                "file_id": file_id,
+                "filename": filename or "Unknown file",
+                "text": text or "",
+                "score": _get(r, "score"),
+                "rank": _get(r, "rank"),
+            }
+            # Only keep meaningful entries
+            if chunk["text"].strip():
+                chunks.append(chunk)
+
+    return container_files, chunks
+
+def _retrieve_response_with_include(response_id: str):
+    """
+    Some SDK versions support include=... on retrieve; others don't.
+    Try with include first, then fall back.
+    """
+    try:
+        return client.responses.retrieve(response_id, include=["file_search_call.results"])
+    except TypeError:
+        return client.responses.retrieve(response_id)
+    except Exception:
+        # fallback anyway
+        return client.responses.retrieve(response_id)
 
 def stream_response_with_file_search(
     conversation_history: List[Dict],
     vector_store_ids: List[str],
-    motion_context: str,
+    motion_context: str
 ) -> Tuple[str, List[Tuple[str, bytes]], List[Dict]]:
     """
     Stream a response using Responses API with file_search and code_interpreter tools.
 
-    Args:
-        conversation_history: List of message items (user/assistant)
-        vector_store_ids: List of vector store IDs to search
-        motion_context: Context about motion type, jurisdiction, chapter
-
     Returns:
-        Tuple of (response_text, list of (filename, bytes) for downloads, list of citations)
+      (response_text, list_of_downloads, retrieved_chunks)
     """
     input_items = [
         {"role": "system", "content": SYSTEM_INSTRUCTIONS},
@@ -233,33 +295,37 @@ def stream_response_with_file_search(
                 {"type": "file_search", "vector_store_ids": vector_store_ids},
                 {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
+            # ✅ This is the key to get the actual retrieved chunks back
+            include=["file_search_call.results"],
             stream=True,
         )
 
         holder = st.empty()
         full_text = ""
-        response_id = None
+        response_id: Optional[str] = None
 
         for event in stream_response:
-            ev_type = getattr(event, "type", None)
-            if ev_type == "response.output_text.delta":
+            etype = getattr(event, "type", None)
+            if etype == "response.output_text.delta":
                 delta = getattr(event, "delta", None)
                 if delta:
                     full_text += delta
                     holder.markdown(full_text)
-            elif ev_type == "response.created":
+            elif etype == "response.created":
                 resp = getattr(event, "response", None)
-                response_id = getattr(resp, "id", None) or response_id
+                rid = getattr(resp, "id", None) if resp else None
+                if rid:
+                    response_id = rid
 
         files_to_download: List[Tuple[str, bytes]] = []
-        citations: List[Dict] = []
+        retrieved_chunks: List[Dict] = []
 
         if response_id:
             try:
-                complete_response = client.responses.retrieve(response_id)
-                file_annotations, citations = extract_annotations_from_response(complete_response)
+                complete_response = _retrieve_response_with_include(response_id)
+                container_files, retrieved_chunks = extract_container_files_and_chunks(complete_response)
 
-                for ann in file_annotations:
+                for ann in container_files:
                     filename, file_bytes = download_container_file(
                         ann["container_id"],
                         ann["file_id"],
@@ -267,10 +333,11 @@ def stream_response_with_file_search(
                     )
                     if file_bytes:
                         files_to_download.append((filename, file_bytes))
-            except Exception as e:
-                st.warning(f"Could not retrieve files/citations from response: {str(e)}")
 
-        return full_text, files_to_download, citations
+            except Exception as e:
+                st.warning(f"Could not retrieve files/chunks from response: {str(e)}")
+
+        return full_text, files_to_download, retrieved_chunks
 
     except Exception as e:
         st.error(f"Error creating response: {str(e)}")
@@ -281,15 +348,10 @@ st.set_page_config("Legal Motion Assistant", layout="wide")
 st.markdown(
     """
     <style>
-    /* --- Base & Fonts --- */
-    html, body, [class*="st-"] {
-        font-family: 'Georgia', serif;
-        color: #333;
-    }
-    body {background-color: #f0f2f6;}
-    h1, h2, h3 {color: #0d1b4c; font-weight: bold;}
+    html, body, [class*="st-"] { font-family: 'Georgia', serif; color: #333; }
+    body { background-color: #f0f2f6; }
+    h1, h2, h3 { color: #0d1b4c; font-weight: bold; }
 
-    /* --- Main Container --- */
     .block-container {
         background-color: #ffffff;
         border-radius: 10px;
@@ -299,15 +361,10 @@ st.markdown(
         margin: 1rem auto;
     }
 
-    /* --- Sidebar --- */
-    [data-testid="stSidebar"] {
-        background-color: #e1e5f0;
-        padding-top: 1.5rem;
-    }
+    [data-testid="stSidebar"] { background-color: #e1e5f0; padding-top: 1.5rem; }
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] label, [data-testid="stSidebar"] button p {
-        color: #0d1b4c;
-    }
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] button p { color: #0d1b4c; }
+
     [data-testid="stFileUploader"] button {
         padding: 6px 12px;
         font-size: 14px;
@@ -316,11 +373,8 @@ st.markdown(
         color: white;
         border-radius: 6px;
     }
-    [data-testid="stFileUploader"] button:hover {
-        background-color: #157347;
-    }
+    [data-testid="stFileUploader"] button:hover { background-color: #157347; }
 
-    /* --- Chat Interface --- */
     [data-testid="stChatInput"] textarea {
         font-size: 16px !important;
         line-height: 1.6 !important;
@@ -334,7 +388,6 @@ st.markdown(
         box-shadow: 0 0 0 2px rgba(13, 27, 76, 0.2);
     }
 
-    /* Chat Message Styling */
     .stChatMessage {
         border-radius: 10px;
         padding: 1rem 1.5rem;
@@ -342,29 +395,15 @@ st.markdown(
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
 
-    /* Assistant messages */
-    [data-testid="stChatMessageContent"] {
-        background-color: transparent;
-    }
-
     div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
         background-color: #e1e5f0 !important;
         border-left: 4px solid #0d1b4c;
     }
-
-    /* User messages */
     div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
         background-color: #d1e7dd !important;
         border-right: 4px solid #198754;
     }
 
-    /* Avatar styling */
-    [data-testid="chatAvatarIcon-user"],
-    [data-testid="chatAvatarIcon-assistant"] {
-        background-color: transparent !important;
-    }
-
-    /* --- Buttons & Inputs --- */
     .stButton button {
         background-color: #198754;
         color: white;
@@ -373,8 +412,9 @@ st.markdown(
         padding: 0.6rem 1.2rem;
         font-weight: bold;
     }
-    .stButton button:hover:not(:disabled) {background-color: #157347;}
-    .stButton button:disabled {background-color: #cccccc; color: #888888;}
+    .stButton button:hover:not(:disabled) { background-color: #157347; }
+    .stButton button:disabled { background-color: #cccccc; color: #888888; }
+
     .stDownloadButton button {
         background-color: #5c6ac4;
         color: white;
@@ -385,7 +425,7 @@ st.markdown(
         margin-top: 5px;
         margin-right: 5px;
     }
-    .stDownloadButton button:hover:not(:disabled) {background-color: #4553a0;}
+    .stDownloadButton button:hover:not(:disabled) { background-color: #4553a0; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -416,28 +456,29 @@ if "schedule_uploaded" not in st.session_state:
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = uk("chat_files")
 
-# ============================================================================
+# =====================================================================
 # ADMIN
-# ============================================================================
+# =====================================================================
 if page == "Admin":
     st.title("⚙️ Admin panel")
 
     # ➊ Create two vector stores
-    if len(cfg.get("vector_stores", {})) < 2 and st.button("Create 2 vector stores"):
-        cfg.setdefault("vector_stores", {})
+    if len(cfg["vector_stores"]) < 2 and st.button("Create 2 vector stores"):
         for slug in MOTION_OPTIONS:
-            cfg["vector_stores"][slug] = client.vector_stores.create(name=f"{slug}_store").id
+            cfg["vector_stores"][slug] = client.vector_stores.create(
+                name=f"{slug}_store"
+            ).id
         save_cfg(cfg)
         st.success("Vector stores created.")
 
     # ➋ Show vector stores
-    if cfg.get("vector_stores"):
+    if cfg["vector_stores"]:
         st.subheader("Vector stores")
         for slug, vsid in cfg["vector_stores"].items():
             st.markdown(f"* **{MOTION_OPTIONS.get(slug, slug)}** → {vsid}")
 
     # ➌ Upload PDFs into a vector store
-    if cfg.get("vector_stores"):
+    if cfg["vector_stores"]:
         st.subheader("Upload PDF knowledge")
         with st.form("upload_form", clear_on_submit=True):
             mlabel = st.selectbox("Destination motion type", list(MOTION_OPTIONS.values()))
@@ -451,7 +492,9 @@ if page == "Admin":
                     st.error("Provide jurisdiction & select PDF(s).")
                 else:
                     if slug not in cfg["vector_stores"]:
-                        cfg["vector_stores"][slug] = client.vector_stores.create(name=f"{slug}_store").id
+                        cfg["vector_stores"][slug] = client.vector_stores.create(
+                            name=f"{slug}_store"
+                        ).id
                         save_cfg(cfg)
 
                     with st.spinner("Uploading & indexing …"):
@@ -459,45 +502,37 @@ if page == "Admin":
                             file_obj = client.files.create(file=f, purpose="assistants")
                             client.vector_stores.files.create(
                                 vector_store_id=cfg["vector_stores"][slug],
-                                file_id=file_obj.id,
+                                file_id=file_obj.id
                             )
                     st.success("Files uploaded & indexed.")
 
     # ➍ Display indexed PDFs
-    if cfg.get("vector_stores"):
+    if cfg["vector_stores"]:
         rows = []
         for slug, vsid in cfg["vector_stores"].items():
             try:
-                vs_files = client.vector_stores.files.list(vector_store_id=vsid, limit=100)
-                items = getattr(vs_files, "data", None) or vs_files
+                vs_files = client.vector_stores.files.list(vsid, limit=100)
+                for vf in vs_files:
+                    try:
+                        file_obj = client.files.retrieve(vf.id)
+                        fname = file_obj.filename
+                    except Exception:
+                        fname = "(unknown)"
 
-                for vf in items:
-                    # vf is a VectorStoreFile; its file id is usually vf.file_id
-                    file_id = getattr(vf, "file_id", None) or getattr(vf, "id", None)
-                    fname = "(unknown)"
-                    if file_id:
-                        try:
-                            file_obj = client.files.retrieve(file_id)
-                            fname = getattr(file_obj, "filename", None) or fname
-                        except Exception:
-                            pass
-
-                    rows.append(
-                        {
-                            "Motion": MOTION_OPTIONS.get(slug, slug),
-                            "Filename": fname,
-                            "Jurisdiction": "N/A",
-                        }
-                    )
+                    rows.append({
+                        "Motion": MOTION_OPTIONS.get(slug, slug),
+                        "Filename": fname,
+                        "Jurisdiction": "N/A",
+                    })
             except Exception as e:
                 st.warning(f"Could not list files for {slug}: {e}")
 
         if rows:
             st.dataframe(pd.DataFrame(rows))
 
-# ============================================================================
+# =====================================================================
 # CHAT
-# ============================================================================
+# =====================================================================
 if page == "Chat":
     st.title("⚖️ Legal Motion Assistant")
 
@@ -520,7 +555,7 @@ if page == "Chat":
         st.sidebar.error("Please select a motion type to enable chat.")
         st.stop()
 
-    if slug not in cfg.get("vector_stores", {}):
+    if slug not in cfg["vector_stores"]:
         st.error("Vector store not found for this motion type. Please create it in Admin.")
         st.stop()
 
@@ -528,18 +563,25 @@ if page == "Chat":
     for h in st.session_state.history:
         with st.chat_message(h["role"]):
             st.markdown(h["content"])
+
             for fn, blob in h.get("files", []):
                 st.download_button(f"Download {fn}", blob, fn, key=uk("dl_hist"))
 
-            # Show citations if available
-            citations = h.get("citations", [])
-            if citations and h["role"] == "assistant":
-                with st.expander(f"📚 View {len(citations)} reference chunk(s)", expanded=False):
-                    for idx, citation in enumerate(citations, 1):
-                        st.markdown(f"**Reference {idx}** (from {citation.get('filename', 'Unknown')})")
-                        quote_text = citation.get("quote") or citation.get("text", "")
-                        if quote_text:
-                            st.markdown(f"> {format_citation_text(quote_text)}")
+            # ✅ Show retrieved chunks (from file_search_call.results)
+            chunks = h.get("citations", [])
+            if chunks and h["role"] == "assistant":
+                with st.expander(f"📚 View {len(chunks)} retrieved reference chunk(s)", expanded=False):
+                    for idx, c in enumerate(chunks, 1):
+                        fname = c.get("filename", "Unknown file")
+                        score = c.get("score")
+                        header = f"**Chunk {idx}** (from {fname})"
+                        if score is not None:
+                            header += f" — score: `{score}`"
+                        st.markdown(header)
+
+                        txt = c.get("text", "")
+                        if txt:
+                            st.markdown(f"> {format_citation_text(txt, max_length=800)}")
                         st.divider()
 
     st.markdown("<div style='padding-bottom:70px'></div>", unsafe_allow_html=True)
@@ -552,7 +594,7 @@ if page == "Chat":
             type=["pdf", "docx", "txt"],
             accept_multiple_files=True,
             key=st.session_state.uploader_key,
-            label_visibility="collapsed",
+            label_visibility="collapsed"
         )
 
     with col_inp:
@@ -560,8 +602,7 @@ if page == "Chat":
 
     # ───── Handle new turn ─────
     if user_prompt:
-        extract_blocks: List[str] = []
-        blobs_for_history: List[Tuple[str, bytes]] = []
+        extract_blocks, blobs_for_history = [], []
 
         if uploaded:
             prog = st.progress(0.0)
@@ -572,28 +613,21 @@ if page == "Chat":
 
                 with st.spinner(f"Gemini reading {uf.name} …"):
                     gem_text = gem_extract(tmp_path, user_prompt)
-
-                    # accept both older/newer "no info" strings
-                    if gem_text and gem_text not in {"NO_RELEVANT_INFO", "NO_RELEVANT_INFO_FOUND_IN_UPLOAD"}:
-                        extract_blocks.append(f"EXTRACTED_FROM_UPLOAD File name ({uf.name}):\n{gem_text}")
-
+                    if gem_text and gem_text not in ("NO_RELEVANT_INFO", "NO_RELEVANT_INFO_FOUND_IN_UPLOAD"):
+                        extract_blocks.append(
+                            f"EXTRACTED_FROM_UPLOAD File name ({uf.name}):\n{gem_text}"
+                        )
                     blobs_for_history.append((uf.name, uf.getvalue()))
 
                 prog.progress(i / len(uploaded))
-
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-
             prog.empty()
 
-            if any(getattr(f, "name", "").lower().endswith(".pdf") for f in uploaded):
+            if any(f.name.lower().endswith(".pdf") for f in uploaded):
                 st.session_state.schedule_uploaded = True
 
         # Store user turn
         st.session_state.history.append(
-            {"role": "user", "content": user_prompt, "files": blobs_for_history, "citations": []}
+            {"role": "user", "content": user_prompt, "files": blobs_for_history}
         )
 
         with st.chat_message("user"):
@@ -617,27 +651,33 @@ if page == "Chat":
 
         # Get response from API
         with st.chat_message("assistant"):
-            answer, new_files, citations = stream_response_with_file_search(
+            answer, new_files, chunks = stream_response_with_file_search(
                 conversation_history,
                 [cfg["vector_stores"][slug]],
-                motion_context,
+                motion_context
             )
 
             for fn, data in new_files:
                 st.download_button(f"Download {fn}", data, fn, key=uk("dl_asst"))
 
-            # Display citations if available
-            if citations:
-                with st.expander(f"📚 View {len(citations)} reference chunk(s)", expanded=False):
-                    for idx, citation in enumerate(citations, 1):
-                        st.markdown(f"**Reference {idx}** (from {citation.get('filename', 'Unknown')})")
-                        quote_text = citation.get("quote") or citation.get("text", "")
-                        if quote_text:
-                            st.markdown(f"> {format_citation_text(quote_text)}")
+            # ✅ Display retrieved chunks immediately
+            if chunks:
+                with st.expander(f"📚 View {len(chunks)} retrieved reference chunk(s)", expanded=False):
+                    for idx, c in enumerate(chunks, 1):
+                        fname = c.get("filename", "Unknown file")
+                        score = c.get("score")
+                        header = f"**Chunk {idx}** (from {fname})"
+                        if score is not None:
+                            header += f" — score: `{score}`"
+                        st.markdown(header)
+
+                        txt = c.get("text", "")
+                        if txt:
+                            st.markdown(f"> {format_citation_text(txt, max_length=800)}")
                         st.divider()
 
         st.session_state.history.append(
-            {"role": "assistant", "content": answer, "files": new_files, "citations": citations}
+            {"role": "assistant", "content": answer, "files": new_files, "citations": chunks}
         )
 
         # Reset uploader key → clears file-picker
