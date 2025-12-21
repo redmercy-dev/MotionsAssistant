@@ -81,7 +81,7 @@ def get_mime(path: str) -> str:
 
 def gem_upload(path: str) -> gtypes.File:
     """Upload file to Gemini and return File object."""
-    return g_client.files.upload(path=path)
+    return g_client.files.upload(file=path)
 
 def gem_extract(path: str, filename: str) -> str:
     """
