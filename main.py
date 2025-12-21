@@ -413,7 +413,7 @@ def stream_response_with_file_search(
 
     try:
         stream_response = client.responses.create(
-            model="gpt-4o",
+            model="gpt-5-mini",
             input=input_items,
             tools=[
                 {"type": "file_search", "vector_store_ids": [vector_store_id]},
