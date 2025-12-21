@@ -49,7 +49,7 @@ client = OpenAI(api_key=openai_api_key)
 
 # ────────── GOOGLE GEMINI CLIENT ──────────
 g_client = genai.Client(api_key=gemini_api_key)
-GEM_MODEL = "gemini-2.0-flash-exp"
+GEM_MODEL =  "gemini-2.5-flash"
 
 # ────────── Password ──────────
 def check_password():
