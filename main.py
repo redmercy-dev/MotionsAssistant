@@ -11,11 +11,7 @@ from google.genai import types as gtypes
 from openai import OpenAI
 
 # ────────── STATIC CONFIG ──────────
-CFG_PATH = "config2.json"
-MOTION_OPTIONS = {
-    "value_claim": "Motion to Value Secured Claim",
-    "avoid_lien": "Motion to Avoid Judicial Lien",
-}
+CFG_PATH = "config_tender.json"
 
 # ────────── STREAMLIT HELPERS ──────────
 def uk(prefix: str = "k") -> str:
@@ -33,10 +29,10 @@ def format_citation_text(text: str, max_length: int = 200) -> str:
 # ────────── PERSISTED CFG ──────────
 def load_cfg() -> Dict:
     if not Path(CFG_PATH).exists():
-        return {"vector_stores": {}}
+        return {"vector_store_id": None}
     with open(CFG_PATH, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    cfg.setdefault("vector_stores", {})
+    cfg.setdefault("vector_store_id", None)
     return cfg
 
 def save_cfg(c: Dict):
@@ -70,9 +66,9 @@ def check_password():
     if st.session_state.get("password_correct", False):
         return True
 
-    st.text_input("Password", type="password", on_change=password_entered, key="password")
+    st.text_input("Mot de passe", type="password", on_change=password_entered, key="password")
     if "password_correct" in st.session_state:
-        st.error("😕 Password incorrect")
+        st.error("😕 Mot de passe incorrect")
     return False
 
 if not check_password():
@@ -87,15 +83,38 @@ def gem_upload(path: str) -> gtypes.File:
     """Upload file to Gemini and return File object."""
     return g_client.files.upload(path=path)
 
-def gem_extract(path: str, user_prompt: str) -> str:
+def gem_extract(path: str, filename: str) -> str:
     """
-    Uploads path to Gemini and asks it to extract facts needed for drafting bankruptcy motions.
+    Uploads path to Gemini and asks it to extract relevant information for tender response.
     """
-    _ = user_prompt
     gfile = gem_upload(path)
 
-    # (Shortened per your instruction)
-    prompt = "You are a specialized paralegal assistant focused on extracting structured factual data from uploaded Bankruptcy Petition and Schedule documents (PDFs)."
+    prompt = f"""Tu es un assistant spécialisé dans l'analyse de documents d'appels d'offres français.
+
+Analyse ce document ({filename}) et extrais TOUTES les informations structurées pertinentes:
+
+1. Si c'est un RC (Règlement de Consultation):
+   - Type de marché et objet
+   - Critères d'évaluation avec pondération
+   - Documents obligatoires à fournir
+   - Planning demandé (OUI/NON)
+   - CVs demandés (OUI/NON, précise les postes)
+   - Contraintes spécifiques (site occupé, phasage, délais, etc.)
+   - Structure attendue du Mémoire Technique
+
+2. Si c'est un CCAP/CCTP:
+   - Exigences techniques clés
+   - Normes et certifications requises
+   - Modalités d'exécution
+   - Points de vigilance
+
+3. Si c'est un document de référence (exemple, proposition concurrente):
+   - Points forts identifiés
+   - Structure utilisée
+   - Arguments mis en avant
+
+Réponds en JSON structuré ou en texte clair avec des sections bien définies.
+Si le document n'est pas pertinent, réponds: NO_RELEVANT_INFO"""
 
     contents = [
         gtypes.Content(
@@ -113,8 +132,105 @@ def gem_extract(path: str, user_prompt: str) -> str:
     return (resp.text or "").strip()
 
 # ────────── SYSTEM INSTRUCTIONS ──────────
-# (Shortened per your instruction)
-SYSTEM_INSTRUCTIONS = "Bankruptcy Motion Drafting (Southern District of Florida Focus)."
+SYSTEM_INSTRUCTIONS = """Role & Goal
+Tu es un assistant IA aidant à générer des livrables de réponse à des appels d'offres français ("Mémoire Technique", "Planning" optionnel, "CVs" optionnels, analyse concurrentielle optionnelle) à partir de documents d'appel d'offres téléchargés par l'utilisateur (RC requis; CCAP/CCTP optionnels) et de documents de référence internes (exemples SEF/templates, propositions passées, etc.).
+
+Règle fondamentale: Automatisation pilotée par le RC
+- Le RC est la source de vérité pour ce qui doit être généré et comment cela doit être structuré.
+- Tu dois automatiquement inférer les sections requises et les livrables conditionnels (planning, CVs) à partir du contenu du RC.
+- L'utilisateur ne devrait PAS avoir besoin de définir manuellement la structure.
+
+Politique RAG-first et anti-hallucination
+- Consulte TOUJOURS les passages récupérés de la base de connaissances / documents téléchargés avant de faire des affirmations factuelles.
+- N'invente JAMAIS de noms, certifications, contraintes de projet, quantités, délais ou exigences client.
+- Si un détail requis est manquant, indique clairement ce qui manque et propose un format de placeholder (ex: "[À compléter: …]") et demande à l'utilisateur/admin de fournir l'information manquante.
+
+Sorties supportées
+Selon la "tâche" demandée par l'utilisateur, tu dois produire:
+A) RC_INTERPRETATION_JSON
+B) MEMOIRE_TECHNIQUE_DRAFT
+C) PLANNING_SPEC (tâches de haut niveau + durées + dépendances)
+D) CV_SPEC (données CV structurées par poste)
+E) COMPETITOR_ANALYSIS_REPORT
+
+Style de sortie
+- Langue française, ton professionnel d'appel d'offres.
+- Titres clairs, points bullet, sections structurées.
+- Alignement explicite aux critères d'évaluation (si présents): les critères à fort poids doivent recevoir plus de détails.
+- Évite le marketing vague; privilégie méthodologie concrète, organisation, contraintes, livrables, QA/HSE, et phasage.
+
+A) Format RC_INTERPRETATION_JSON (strict)
+Retourne un objet JSON avec:
+{
+  "business_type": "new_construction|renovation|maintenance|unknown",
+  "evaluation_criteria": [{"name": "...", "weight": "..."}, ...],
+  "mandatory_documents": ["...", ...],
+  "planning_required": true|false,
+  "cvs_required": true|false,
+  "required_roles_for_cvs": ["...", ...],
+  "required_sections": [{"title":"...", "purpose":"...", "key_points":["..."]}],
+  "special_constraints": ["...", ...],
+  "open_questions": ["...", ...]
+}
+
+B) Format MEMOIRE_TECHNIQUE_DRAFT
+Retourne:
+- Titre
+- Table des matières (titres de sections)
+- Puis chaque section avec:
+  - Objectif de la section
+  - Contenu (français, professionnel)
+  - Bullets "Conformité RC" mappant: quelle exigence RC cela adresse (si connu)
+- Termine avec une table "Checklist de conformité" (Exigence → Où traité → Statut: couvert/partiel/manquant)
+
+C) Format PLANNING_SPEC
+Retourne un objet JSON avec:
+{
+  "assumptions": ["..."],
+  "calendar": {"work_days": "...", "constraints": ["..."]},
+  "tasks": [
+    {"id":"T1","name":"...","duration_days":X,"depends_on":["T0"],"notes":"..."},
+    ...
+  ],
+  "milestones": [{"name":"...","day":X}]
+}
+Garde-le réaliste et cohérent avec les contraintes du RC (phasage, site occupé, limites d'accès, etc.). Si contraintes manquantes, mets des hypothèses explicitement.
+
+D) Format CV_SPEC
+Retourne un objet JSON avec:
+{
+  "roles": [
+    {
+      "role_name":"...",
+      "required_by_rc": true,
+      "candidates": [
+        {
+          "full_name":"(seulement si fourni dans les données; sinon placeholder)",
+          "title":"...",
+          "years_experience":"...",
+          "key_projects":["..."],
+          "certifications":["..."],
+          "responsibilities_on_this_tender":["..."]
+        }
+      ]
+    }
+  ],
+  "missing_employee_data": ["..."]
+}
+N'invente pas de personnes ou de certifications.
+
+E) Format COMPETITOR_ANALYSIS_REPORT
+Retourne:
+- Résumé des forces/faiblesses concurrentes (basé uniquement sur les docs concurrents fournis)
+- Points de comparaison vs approche SEF
+- 10 améliorations actionnables pour la proposition SEF, alignées avec les critères d'évaluation
+- Bullets "Preuves" référençant ce qui a été vu dans les docs concurrents (pas de citations >25 mots)
+
+Comportement général
+- Si on te demande de générer un livrable que le RC n'exige PAS (ex: planning quand le RC ne le demande pas), dis: "Le RC ne semble pas exiger X. Confirmez si vous souhaitez quand même le générer."
+- Garde toujours les sorties structurées et prêtes pour le rendu de documents en aval (python-docx/reportlab).
+
+IMPORTANT: Utilise TOUJOURS les passages récupérés via RAG avant de répondre. Base tes réponses sur les documents fournis."""
 
 # ────────── OpenAI Container File Download Helpers ──────────
 def download_container_file(container_id: str, file_id: str, filename: str) -> Tuple[str, bytes]:
@@ -128,7 +244,7 @@ def download_container_file(container_id: str, file_id: str, filename: str) -> T
         response.raise_for_status()
         return (filename, response.content)
     except Exception as e:
-        st.warning(f"Could not download file {filename}: {str(e)}")
+        st.warning(f"Impossible de télécharger le fichier {filename}: {str(e)}")
         return (filename, b"")
 
 # ────────── Robust helpers for SDK objects/dicts ──────────
@@ -208,7 +324,7 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
                         }
                     )
 
-    # 2) Retrieved chunks (from file_search_call.results) — requires include=["file_search_call.results"]
+    # 2) Retrieved chunks (from file_search_call.results)
     for output_item in output_items:
         if _get(output_item, "type") != "file_search_call":
             continue
@@ -224,9 +340,9 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
             if not filename and file_id:
                 try:
                     fobj = client.files.retrieve(file_id)
-                    filename = getattr(fobj, "filename", None) or "Unknown file"
+                    filename = getattr(fobj, "filename", None) or "Fichier inconnu"
                 except Exception:
-                    filename = "Unknown file"
+                    filename = "Fichier inconnu"
 
             text = (
                 _get(r, "text")
@@ -237,7 +353,7 @@ def extract_container_files_and_chunks(response_obj) -> Tuple[List[Dict], List[D
 
             chunk = {
                 "file_id": file_id,
-                "filename": filename or "Unknown file",
+                "filename": filename or "Fichier inconnu",
                 "text": text or "",
                 "score": _get(r, "score"),
                 "rank": _get(r, "rank"),
@@ -265,8 +381,8 @@ def _retrieve_response_with_include(response_id: str):
 
 def stream_response_with_file_search(
     conversation_history: List[Dict],
-    vector_store_ids: List[str],
-    motion_context: str
+    vector_store_id: str,
+    context: str
 ) -> Tuple[str, List[Tuple[str, bytes]], List[Dict]]:
     """
     Stream a response using Responses API with file_search and code_interpreter tools.
@@ -276,7 +392,7 @@ def stream_response_with_file_search(
     """
     input_items = [
         {"role": "system", "content": SYSTEM_INSTRUCTIONS},
-        {"role": "system", "content": motion_context},
+        {"role": "system", "content": context},
     ]
     input_items.extend(conversation_history)
 
@@ -285,7 +401,7 @@ def stream_response_with_file_search(
             model="gpt-4o",
             input=input_items,
             tools=[
-                {"type": "file_search", "vector_store_ids": vector_store_ids},
+                {"type": "file_search", "vector_store_ids": [vector_store_id]},
                 {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
             include=["file_search_call.results"],
@@ -327,28 +443,19 @@ def stream_response_with_file_search(
                         files_to_download.append((filename, file_bytes))
 
             except Exception as e:
-                st.warning(f"Could not retrieve files/chunks from response: {str(e)}")
+                st.warning(f"Impossible de récupérer les fichiers/chunks de la réponse: {str(e)}")
 
         return full_text, files_to_download, retrieved_chunks
 
     except Exception as e:
-        st.error(f"Error creating response: {str(e)}")
+        st.error(f"Erreur lors de la création de la réponse: {str(e)}")
         return "", [], []
 
 # ────────── STREAMLIT UI STYLES ──────────
-st.set_page_config("Legal Motion Assistant", layout="wide")
+st.set_page_config("Générateur de Réponse d'Appel d'Offres", layout="wide")
 st.markdown(
     """
     <style>
-    /* ------------------------------------------------------------------
-       IMPORTANT FIX:
-       Your previous global font rule applied to ALL Streamlit elements,
-       which breaks Material Symbols (icons become visible as text like
-       "smart_toy", "face", "keyboard_arrow_down").
-       We keep your typography, but force icon spans back to Material font.
-    ------------------------------------------------------------------ */
-
-    /* --- Base & Fonts --- */
     html, body, [class*="st-"] {
         font-family: 'Georgia', serif;
         color: #333;
@@ -356,7 +463,6 @@ st.markdown(
     body {background-color: #f0f2f6;}
     h1, h2, h3 {color: #0d1b4c; font-weight: bold;}
 
-    /* --- FORCE Material Symbols to render as icons (NOT text) --- */
     .material-symbols-rounded,
     .material-symbols-outlined,
     .material-icons,
@@ -379,7 +485,6 @@ st.markdown(
         font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24 !important;
     }
 
-    /* --- Make expander header layout clean so it never overlays text --- */
     [data-testid="stExpander"] summary {
         display: flex !important;
         align-items: center !important;
@@ -389,7 +494,6 @@ st.markdown(
         flex: 0 0 auto !important;
     }
 
-    /* --- Main Container --- */
     .block-container {
         background-color: #ffffff;
         border-radius: 10px;
@@ -399,7 +503,6 @@ st.markdown(
         margin: 1rem auto;
     }
 
-    /* --- Sidebar --- */
     [data-testid="stSidebar"] {
         background-color: #e1e5f0;
         padding-top: 1.5rem;
@@ -420,7 +523,6 @@ st.markdown(
         background-color: #157347;
     }
 
-    /* --- Chat Interface --- */
     [data-testid="stChatInput"] textarea {
         font-size: 16px !important;
         line-height: 1.6 !important;
@@ -434,7 +536,6 @@ st.markdown(
         box-shadow: 0 0 0 2px rgba(13, 27, 76, 0.2);
     }
 
-    /* Chat Message Styling */
     .stChatMessage {
         border-radius: 10px;
         padding: 1rem 1.5rem;
@@ -442,7 +543,6 @@ st.markdown(
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
 
-    /* Assistant messages */
     [data-testid="stChatMessageContent"] {
         background-color: transparent;
     }
@@ -452,19 +552,16 @@ st.markdown(
         border-left: 4px solid #0d1b4c;
     }
 
-    /* User messages */
     div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
         background-color: #d1e7dd !important;
         border-right: 4px solid #198754;
     }
 
-    /* Avatar styling */
     [data-testid="chatAvatarIcon-user"],
     [data-testid="chatAvatarIcon-assistant"] {
         background-color: transparent !important;
     }
 
-    /* --- Buttons & Inputs --- */
     .stButton button {
         background-color: #198754;
         color: white;
@@ -494,25 +591,22 @@ st.markdown(
 page = st.sidebar.radio("Page", ("Chat", "Admin"))
 
 # ────────── RESET BUTTON ──────────
-if st.sidebar.button("🔄 Reset workspace"):
+if st.sidebar.button("🔄 Réinitialiser l'espace"):
     Path(CFG_PATH).unlink(missing_ok=True)
-    cfg = {"vector_stores": {}}
-    st.session_state.schedule_uploaded = False
-    st.sidebar.success("Workspace cleared – open *Admin* to start fresh.")
+    cfg = {"vector_store_id": None}
+    st.session_state.clear()
+    st.sidebar.success("Espace effacé – ouvrez *Admin* pour recommencer.")
     st.rerun()
 
 # ────────── CLEAR CHAT BUTTON ──────────
-if page == "Chat" and st.sidebar.button("🗑️ Clear chat"):
+if page == "Chat" and st.sidebar.button("🗑️ Effacer le chat"):
     st.session_state.history = []
-    st.session_state.schedule_uploaded = False
-    st.sidebar.success("Chat history cleared.")
+    st.sidebar.success("Historique du chat effacé.")
     st.rerun()
 
 # ────────── SESSION INIT ──────────
 if "history" not in st.session_state:
     st.session_state.history: List[Dict] = []
-if "schedule_uploaded" not in st.session_state:
-    st.session_state.schedule_uploaded = False
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = uk("chat_files")
 
@@ -520,103 +614,100 @@ if "uploader_key" not in st.session_state:
 # ADMIN
 # ============================================================================
 if page == "Admin":
-    st.title("⚙️ Admin panel")
+    st.title("⚙️ Panneau d'administration")
 
-    # ➊ Create two vector stores
-    if len(cfg["vector_stores"]) < 2 and st.button("Create 2 vector stores"):
-        for slug in MOTION_OPTIONS:
-            cfg["vector_stores"][slug] = client.vector_stores.create(name=f"{slug}_store").id
+    # ➊ Create vector store
+    if not cfg.get("vector_store_id") and st.button("Créer le vector store"):
+        vs = client.vector_stores.create(name="tender_documents_store")
+        cfg["vector_store_id"] = vs.id
         save_cfg(cfg)
-        st.success("Vector stores created.")
+        st.success(f"Vector store créé: {vs.id}")
+        st.rerun()
 
-    # ➋ Show vector stores
-    if cfg["vector_stores"]:
-        st.subheader("Vector stores")
-        for slug, vsid in cfg["vector_stores"].items():
-            st.markdown(f"* **{MOTION_OPTIONS.get(slug, slug)}** → {vsid}")
+    # ➋ Show vector store
+    if cfg.get("vector_store_id"):
+        st.subheader("Vector store")
+        st.markdown(f"**ID:** `{cfg['vector_store_id']}`")
 
-    # ➌ Upload PDFs into a vector store
-    if cfg["vector_stores"]:
-        st.subheader("Upload PDF knowledge")
+    # ➌ Upload documents into vector store
+    if cfg.get("vector_store_id"):
+        st.subheader("Télécharger des documents de référence")
         with st.form("upload_form", clear_on_submit=True):
-            mlabel = st.selectbox("Destination motion type", list(MOTION_OPTIONS.values()))
-            slug = next(k for k, v in MOTION_OPTIONS.items() if v == mlabel)
-            juris = st.text_input("Jurisdiction")
-            files_ = st.file_uploader("PDF files", type="pdf", accept_multiple_files=True)
-            submitted = st.form_submit_button("Upload")
+            doc_type = st.selectbox(
+                "Type de document",
+                ["RC", "CCAP", "CCTP", "Exemple SEF", "Template", "Proposition concurrente", "Autre"]
+            )
+            files_ = st.file_uploader("Fichiers PDF", type="pdf", accept_multiple_files=True)
+            submitted = st.form_submit_button("Télécharger")
 
             if submitted:
-                if not (juris and files_):
-                    st.error("Provide jurisdiction & select PDF(s).")
+                if not files_:
+                    st.error("Sélectionnez au moins un fichier PDF.")
                 else:
-                    if slug not in cfg["vector_stores"]:
-                        cfg["vector_stores"][slug] = client.vector_stores.create(name=f"{slug}_store").id
-                        save_cfg(cfg)
-
-                    with st.spinner("Uploading & indexing …"):
+                    with st.spinner("Téléchargement et indexation …"):
                         for f in files_:
                             file_obj = client.files.create(file=f, purpose="assistants")
                             client.vector_stores.files.create(
-                                vector_store_id=cfg["vector_stores"][slug],
+                                vector_store_id=cfg["vector_store_id"],
                                 file_id=file_obj.id
                             )
-                    st.success("Files uploaded & indexed.")
+                    st.success(f"{len(files_)} fichier(s) téléchargé(s) et indexé(s).")
+                    st.rerun()
 
-    # ➍ Display indexed PDFs
-    if cfg["vector_stores"]:
-        rows = []
-        for slug, vsid in cfg["vector_stores"].items():
-            try:
-                vs_files = client.vector_stores.files.list(vector_store_id=vsid, limit=100)
-                items = getattr(vs_files, "data", None) or vs_files
-                for vf in items:
-                    file_id = getattr(vf, "file_id", None) or getattr(vf, "id", None)
-                    fname = "(unknown)"
-                    if file_id:
-                        try:
-                            file_obj = client.files.retrieve(file_id)
-                            fname = getattr(file_obj, "filename", None) or fname
-                        except Exception:
-                            pass
-                    rows.append({
-                        "Motion": MOTION_OPTIONS.get(slug, slug),
-                        "Filename": fname,
-                        "Jurisdiction": "N/A",
-                    })
-            except Exception as e:
-                st.warning(f"Could not list files for {slug}: {e}")
-
-        if rows:
-            st.dataframe(pd.DataFrame(rows))
+    # ➍ Display indexed documents
+    if cfg.get("vector_store_id"):
+        st.subheader("Documents indexés")
+        try:
+            vs_files = client.vector_stores.files.list(vector_store_id=cfg["vector_store_id"], limit=100)
+            items = getattr(vs_files, "data", None) or vs_files
+            
+            rows = []
+            for vf in items:
+                file_id = getattr(vf, "file_id", None) or getattr(vf, "id", None)
+                fname = "(inconnu)"
+                if file_id:
+                    try:
+                        file_obj = client.files.retrieve(file_id)
+                        fname = getattr(file_obj, "filename", None) or fname
+                    except Exception:
+                        pass
+                rows.append({
+                    "Fichier": fname,
+                    "ID": file_id or "N/A",
+                })
+            
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            else:
+                st.info("Aucun document indexé pour le moment.")
+        except Exception as e:
+            st.warning(f"Impossible de lister les fichiers: {e}")
 
 # ============================================================================
 # CHAT
 # ============================================================================
 if page == "Chat":
-    st.title("⚖️ Legal Motion Assistant")
+    st.title("📋 Générateur de Réponse d'Appel d'Offres")
 
-    # ───── Mandatory selections ─────
-    motion_label = st.sidebar.selectbox(
-        "Motion type (required)",
-        ["— Select —"] + list(MOTION_OPTIONS.values()),
-        key="motion_type",
-    )
-    slug = (
-        next((k for k, v in MOTION_OPTIONS.items() if v == motion_label), None)
-        if motion_label != "— Select —"
-        else None
-    )
-
-    juris = st.sidebar.text_input("Jurisdiction (optional)")
-    chapter = st.sidebar.selectbox("Bankruptcy Chapter (optional)", ["", "7", "11", "13"])
-
-    if slug is None:
-        st.sidebar.error("Please select a motion type to enable chat.")
+    if not cfg.get("vector_store_id"):
+        st.error("Vector store non configuré. Veuillez aller dans Admin pour le créer.")
         st.stop()
 
-    if slug not in cfg["vector_stores"]:
-        st.error("Vector store not found for this motion type. Please create it in Admin.")
-        st.stop()
+    # ───── Task selector ─────
+    task_type = st.sidebar.selectbox(
+        "Type de sortie",
+        [
+            "💬 Discussion libre",
+            "🔍 Interpréter le RC",
+            "📄 Générer Mémoire Technique",
+            "📅 Générer Planning",
+            "👤 Générer CVs",
+            "🔎 Analyser concurrence"
+        ],
+        key="task_type",
+    )
+
+    version = st.sidebar.selectbox("Version", ["V1", "V2", "V3"], key="version")
 
     # ───── DISPLAY HISTORY ─────
     for h in st.session_state.history:
@@ -625,15 +716,15 @@ if page == "Chat":
             st.markdown(h["content"])
 
             for fn, blob in h.get("files", []):
-                st.download_button(f"Download {fn}", blob, fn, key=uk("dl_hist"))
+                st.download_button(f"Télécharger {fn}", blob, fn, key=uk("dl_hist"))
 
             chunks = h.get("citations", [])
             if chunks and h["role"] == "assistant":
-                with st.expander(f"📚 View {len(chunks)} retrieved reference chunk(s)", expanded=False):
+                with st.expander(f"📚 Voir {len(chunks)} passage(s) récupéré(s)", expanded=False):
                     for idx, c in enumerate(chunks, 1):
-                        fname = c.get("filename", "Unknown file")
+                        fname = c.get("filename", "Fichier inconnu")
                         score = c.get("score")
-                        header = f"**Chunk {idx}** (from {fname})"
+                        header = f"**Passage {idx}** (de {fname})"
                         if score is not None:
                             header += f" — score: `{score}`"
                         st.markdown(header)
@@ -649,7 +740,7 @@ if page == "Chat":
     col_inp, col_up = st.columns([5, 2])
     with col_up:
         uploaded = st.file_uploader(
-            "💎",
+            "📎 Documents",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=True,
             key=st.session_state.uploader_key,
@@ -657,7 +748,7 @@ if page == "Chat":
         )
 
     with col_inp:
-        user_prompt = st.chat_input("Ask or continue …")
+        user_prompt = st.chat_input("Posez votre question ou continuez …")
 
     # ───── Handle new turn ─────
     if user_prompt:
@@ -670,10 +761,10 @@ if page == "Chat":
                     tmp.write(uf.getvalue())
                     tmp_path = tmp.name
 
-                with st.spinner(f"Gemini reading {uf.name} …"):
-                    gem_text = gem_extract(tmp_path, user_prompt)
+                with st.spinner(f"Gemini analyse {uf.name} …"):
+                    gem_text = gem_extract(tmp_path, uf.name)
                     if gem_text and gem_text not in ("NO_RELEVANT_INFO", "NO_RELEVANT_INFO_FOUND_IN_UPLOAD"):
-                        extract_blocks.append(f"EXTRACTED_FROM_UPLOAD File name ({uf.name}):\n{gem_text}")
+                        extract_blocks.append(f"EXTRACTED_FROM_UPLOAD Nom du fichier ({uf.name}):\n{gem_text}")
                     blobs_for_history.append((uf.name, uf.getvalue()))
 
                 prog.progress(i / len(uploaded))
@@ -685,9 +776,6 @@ if page == "Chat":
 
             prog.empty()
 
-            if any(f.name.lower().endswith(".pdf") for f in uploaded):
-                st.session_state.schedule_uploaded = True
-
         # Store user turn
         st.session_state.history.append(
             {"role": "user", "content": user_prompt, "files": blobs_for_history}
@@ -696,18 +784,17 @@ if page == "Chat":
         with st.chat_message("user", avatar="🙂"):
             st.markdown(user_prompt)
             for fn, blob in blobs_for_history:
-                st.download_button(f"Download {fn}", blob, fn, key=uk("dl_user"))
+                st.download_button(f"Télécharger {fn}", blob, fn, key=uk("dl_user"))
 
-        # Build motion context
+        # Build context
         context_parts = [
-            f"Motion type: {motion_label}",
-            f"Jurisdiction: {juris or '(unspecified)'}",
-            f"Chapter: {chapter or '(unspecified)'}",
+            f"Type de tâche demandée: {task_type}",
+            f"Version: {version}",
         ]
         if extract_blocks:
             context_parts.append("\n".join(extract_blocks))
 
-        motion_context = "\n".join(context_parts)
+        context = "\n".join(context_parts)
 
         # Prepare conversation for API
         conversation_history = [{"role": hh["role"], "content": hh["content"]} for hh in st.session_state.history]
@@ -716,19 +803,19 @@ if page == "Chat":
         with st.chat_message("assistant", avatar="🤖"):
             answer, new_files, chunks = stream_response_with_file_search(
                 conversation_history,
-                [cfg["vector_stores"][slug]],
-                motion_context
+                cfg["vector_store_id"],
+                context
             )
 
             for fn, data in new_files:
-                st.download_button(f"Download {fn}", data, fn, key=uk("dl_asst"))
+                st.download_button(f"Télécharger {fn}", data, fn, key=uk("dl_asst"))
 
             if chunks:
-                with st.expander(f"📚 View {len(chunks)} retrieved reference chunk(s)", expanded=False):
+                with st.expander(f"📚 Voir {len(chunks)} passage(s) récupéré(s)", expanded=False):
                     for idx, c in enumerate(chunks, 1):
-                        fname = c.get("filename", "Unknown file")
+                        fname = c.get("filename", "Fichier inconnu")
                         score = c.get("score")
-                        header = f"**Chunk {idx}** (from {fname})"
+                        header = f"**Passage {idx}** (de {fname})"
                         if score is not None:
                             header += f" — score: `{score}`"
                         st.markdown(header)
