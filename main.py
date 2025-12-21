@@ -49,7 +49,7 @@ client = OpenAI(api_key=openai_api_key)
 
 # ────────── GOOGLE GEMINI CLIENT ──────────
 g_client = genai.Client(api_key=gemini_api_key)
-GEM_MODEL =  "gemini-2.5-flash"
+GEM_MODEL = "gemini-2.5-flash"
 
 # ────────── Password ──────────
 def check_password():
@@ -83,9 +83,10 @@ def gem_upload(path: str) -> gtypes.File:
     """Upload file to Gemini and return File object."""
     return g_client.files.upload(file=path)
 
-def gem_extract(path: str, filename: str) -> str:
+def gem_extract(path: str, filename: str) -> tuple[str, bool]:
     """
     Uploads path to Gemini and asks it to extract relevant information for tender response.
+    Returns: (extracted_text, is_rc_document)
     """
     gfile = gem_upload(path)
 
@@ -93,27 +94,39 @@ def gem_extract(path: str, filename: str) -> str:
 
 Analyse ce document ({filename}) et extrais TOUTES les informations structurées pertinentes:
 
-1. Si c'est un RC (Règlement de Consultation):
-   - Type de marché et objet
-   - Critères d'évaluation avec pondération
-   - Documents obligatoires à fournir
-   - Planning demandé (OUI/NON)
-   - CVs demandés (OUI/NON, précise les postes)
-   - Contraintes spécifiques (site occupé, phasage, délais, etc.)
-   - Structure attendue du Mémoire Technique
+1. **DÉTERMINE D'ABORD LE TYPE DE DOCUMENT:**
+   - Est-ce un RC (Règlement de Consultation)? → Réponds "TYPE:RC" en première ligne
+   - Est-ce un CCAP/CCTP? → Réponds "TYPE:CCAP_CCTP"
+   - Est-ce un document de référence? → Réponds "TYPE:REFERENCE"
+   - Sinon → Réponds "TYPE:OTHER"
 
-2. Si c'est un CCAP/CCTP:
+2. Si c'est un RC (Règlement de Consultation):
+   - **Objet du marché** (description complète)
+   - **Type de marché** (construction neuve/rénovation/maintenance)
+   - **Critères d'évaluation** avec pondération EXACTE (ex: "Méthodologie: 40%")
+   - **Documents obligatoires à fournir** (liste exhaustive)
+   - **Planning demandé** (OUI/NON - cherche "planning", "calendrier", "délais d'exécution")
+   - **CVs demandés** (OUI/NON - liste les postes: conducteur travaux, HSE, etc.)
+   - **Structure attendue du Mémoire Technique** (sections requises)
+   - **Contraintes spécifiques** (site occupé, phasage, délais, accès, normes)
+   - **Durée du marché** et dates clés
+   - **Budget/montant** si indiqué
+
+3. Si c'est un CCAP/CCTP:
    - Exigences techniques clés
    - Normes et certifications requises
    - Modalités d'exécution
    - Points de vigilance
 
-3. Si c'est un document de référence (exemple, proposition concurrente):
+4. Si c'est un document de référence (exemple, proposition concurrente):
    - Points forts identifiés
    - Structure utilisée
    - Arguments mis en avant
 
-Réponds en JSON structuré ou en texte clair avec des sections bien définies.
+**FORMAT DE RÉPONSE:**
+Commence TOUJOURS par "TYPE:XXX" sur la première ligne.
+Puis réponds en JSON structuré OU en texte clair avec des sections bien définies et des bullets.
+
 Si le document n'est pas pertinent, réponds: NO_RELEVANT_INFO"""
 
     contents = [
@@ -129,7 +142,9 @@ Si le document n'est pas pertinent, réponds: NO_RELEVANT_INFO"""
         model=GEM_MODEL,
         contents=contents,
     )
-    return (resp.text or "").strip()
+    text = (resp.text or "").strip()
+    is_rc = text.startswith("TYPE:RC")
+    return text, is_rc
 
 # ────────── SYSTEM INSTRUCTIONS ──────────
 SYSTEM_INSTRUCTIONS = """Role & Goal
@@ -753,6 +768,7 @@ if page == "Chat":
     # ───── Handle new turn ─────
     if user_prompt:
         extract_blocks, blobs_for_history = [], []
+        rc_detected = False
 
         if uploaded:
             prog = st.progress(0.0)
@@ -762,9 +778,11 @@ if page == "Chat":
                     tmp_path = tmp.name
 
                 with st.spinner(f"Gemini analyse {uf.name} …"):
-                    gem_text = gem_extract(tmp_path, uf.name)
+                    gem_text, is_rc = gem_extract(tmp_path, uf.name)
                     if gem_text and gem_text not in ("NO_RELEVANT_INFO", "NO_RELEVANT_INFO_FOUND_IN_UPLOAD"):
                         extract_blocks.append(f"EXTRACTED_FROM_UPLOAD Nom du fichier ({uf.name}):\n{gem_text}")
+                        if is_rc:
+                            rc_detected = True
                     blobs_for_history.append((uf.name, uf.getvalue()))
 
                 prog.progress(i / len(uploaded))
@@ -776,6 +794,50 @@ if page == "Chat":
 
             prog.empty()
 
+        # AUTO-WORKFLOW: If RC detected, override user prompt with structured workflow
+        if rc_detected and not user_prompt.strip().lower().startswith(("ne génère pas", "attends", "stop")):
+            user_prompt = """🚀 RC DÉTECTÉ - LANCEMENT DU WORKFLOW AUTOMATIQUE
+
+Je vais maintenant exécuter le workflow complet:
+
+**ÉTAPE 1: INTERPRÉTATION DU RC**
+Analyse le RC extrait ci-dessus et génère l'interprétation structurée (RC_INTERPRETATION_JSON).
+Identifie automatiquement:
+- Les critères d'évaluation et leur poids
+- Les documents obligatoires
+- Si un planning est requis
+- Si des CVs sont requis (et pour quels postes)
+- La structure attendue du Mémoire Technique
+- Les contraintes spécifiques
+
+**ÉTAPE 2: PLAN DE DOCUMENT**
+Propose un plan détaillé du Mémoire Technique avec:
+- Sections alignées sur les critères d'évaluation
+- Sous-sections couvrant toutes les exigences RC
+- Mapping: chaque exigence RC → section qui la traite
+
+**ÉTAPE 3: GÉNÉRATION DES SECTIONS**
+Pour chaque section du plan:
+- Génère le contenu professionnel en français
+- Utilise RAG pour récupérer informations pertinentes
+- Aligne sur les critères à fort coefficient
+- Indique conformité RC
+
+**ÉTAPE 4: CHECKLIST DE CONFORMITÉ**
+Crée un tableau récapitulatif:
+| Exigence RC | Section traitant | Statut |
+
+**ÉTAPE 5: LIVRABLES CONDITIONNELS**
+- Si planning requis → Propose PLANNING_SPEC
+- Si CVs requis → Propose CV_SPEC avec postes identifiés
+
+Après avoir tout généré, demande-moi si je veux:
+- Générer les fichiers DOCX/PDF
+- Faire des ajustements
+- Générer une V2 améliorée
+
+**COMMENCE MAINTENANT L'ÉTAPE 1 (Interprétation du RC):**"""
+
         # Store user turn
         st.session_state.history.append(
             {"role": "user", "content": user_prompt, "files": blobs_for_history}
@@ -786,10 +848,147 @@ if page == "Chat":
             for fn, blob in blobs_for_history:
                 st.download_button(f"Télécharger {fn}", blob, fn, key=uk("dl_user"))
 
-        # Build context
+        # Build context with task-specific instructions
+        task_instructions = {
+            "💬 Discussion libre": "Réponds aux questions de l'utilisateur en utilisant les documents disponibles via RAG. Sois précis et cite tes sources.",
+            
+            "🔍 Interpréter le RC": """TÂCHE SPÉCIFIQUE: Analyse le RC et retourne un JSON strictement conforme au format RC_INTERPRETATION_JSON.
+Tu DOIS extraire:
+- business_type (type de marché)
+- evaluation_criteria avec poids EXACTS (cherche les pourcentages ou points)
+- mandatory_documents (tous les documents demandés)
+- planning_required (true si le RC demande un planning/calendrier/délais d'exécution)
+- cvs_required (true si le RC demande des CV d'équipe) 
+- required_roles_for_cvs si applicable (conducteur travaux, HSE, chef chantier, etc.)
+- required_sections (structure attendue du Mémoire Technique)
+- special_constraints (site occupé, phasage, normes, accès limités)
+- open_questions (informations manquantes)
+
+Utilise UNIQUEMENT les informations du RC récupérées via RAG. N'invente rien.""",
+
+            "📄 Générer Mémoire Technique": f"""TÂCHE SPÉCIFIQUE: Génère un Mémoire Technique complet en français (VERSION {version}).
+
+SI C'EST LA PREMIÈRE GÉNÉRATION APRÈS UPLOAD DU RC:
+Exécute automatiquement le WORKFLOW COMPLET (5 étapes) sans attendre confirmation.
+
+Format MEMOIRE_TECHNIQUE_DRAFT:
+1. Titre professionnel du projet
+2. Table des matières détaillée
+3. Pour CHAQUE section:
+   - **Titre de la section**
+   - **Objectif** (2-3 phrases)
+   - **Contenu** (3-5 paragraphes MINIMUM, professionnel, concret)
+     * Méthodologie détaillée
+     * Organisation et moyens
+     * Gestion des contraintes identifiées dans le RC
+     * Points de vigilance et solutions
+   - **Conformité RC** (bullets listant les exigences RC couvertes)
+4. **Checklist de conformité finale** (tableau):
+   | Exigence RC | Section(s) traitant | Statut |
+
+IMPORTANT:
+- Utilise RAG pour récupérer: contraintes RC, critères d'évaluation, exigences techniques
+- Priorise les critères à FORT COEFFICIENT (40%+) → 2-3x plus de contenu
+- Sois CONCRET: pas de généralités, mais des méthodologies applicables
+- Mentionne outils, processus, normes, équipements spécifiques
+- Si {version} = V2 ou V3: améliore/détaille vs version précédente selon feedback utilisateur
+- N'invente PAS de certifications, références projets, ou données techniques non documentées
+- Chaque section doit faire AU MINIMUM 3 paragraphes substantiels""",
+
+            "📅 Générer Planning": """TÂCHE SPÉCIFIQUE: Génère un planning au format PLANNING_SPEC (JSON).
+Structure requise:
+{
+  "assumptions": ["Base sur 5j/semaine", "Équipe de X personnes", etc.],
+  "calendar": {
+    "work_days": "Lundi-Vendredi", 
+    "constraints": ["Site occupé", "Accès limités 8h-17h", etc.]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "name": "Installation de chantier",
+      "duration_days": 5,
+      "depends_on": [],
+      "notes": "Inclut clôtures, base vie, raccordements"
+    },
+    ...
+  ],
+  "milestones": [
+    {"name": "Début travaux", "day": 0},
+    {"name": "Réception", "day": 120}
+  ]
+}
+
+IMPORTANT:
+- Utilise RAG pour récupérer: durée marché, contraintes phasage, délais RC
+- Si contraintes manquantes → liste explicitement dans assumptions
+- Découpe en 15-25 tâches réalistes avec dépendances logiques
+- Durées cohérentes avec type de marché (construction: mois, maintenance: jours)
+- Ce JSON servira à générer Gantt PNG + Excel + PDF automatiquement""",
+
+            "👤 Générer CVs": """TÂCHE SPÉCIFIQUE: Génère des CVs structurés au format CV_SPEC (JSON).
+Structure requise:
+{
+  "roles": [
+    {
+      "role_name": "Conducteur de travaux",
+      "required_by_rc": true,
+      "candidates": [
+        {
+          "full_name": "[À compléter: nom prénom du collaborateur]",
+          "title": "Conducteur de travaux TCE",
+          "years_experience": "[À compléter: X années]",
+          "key_projects": [
+            "[À compléter: Projet similaire 1]",
+            "[À compléter: Projet similaire 2]"
+          ],
+          "certifications": [
+            "[À compléter: ex. CACES, habilitations]"
+          ],
+          "responsibilities_on_this_tender": [
+            "Coordination des corps d'état",
+            "Suivi planning et budget",
+            "Interface client quotidienne"
+          ]
+        }
+      ]
+    }
+  ],
+  "missing_employee_data": [
+    "Identités et parcours des collaborateurs",
+    "Certifications et habilitations à jour",
+    "Références projets similaires détaillées"
+  ]
+}
+
+CRITIQUE: N'INVENTE JAMAIS de noms, certifications ou expériences. 
+Si données RH manquantes, utilise "[À compléter: ...]" et liste dans missing_employee_data.
+Propose des responsabilités réalistes pour le marché concerné.""",
+
+            "🔎 Analyser concurrence": """TÂCHE SPÉCIFIQUE: Analyse les propositions concurrentes au format COMPETITOR_ANALYSIS_REPORT.
+
+Structure:
+1. **Résumé forces/faiblesses** de chaque concurrent (basé UNIQUEMENT sur docs fournis)
+2. **Tableau comparatif** (notre approche vs concurrents):
+   | Critère RC | Concurrent A | Concurrent B | Notre approche proposée |
+3. **10 améliorations actionnables** pour notre offre:
+   - Alignées sur critères RC à fort coefficient
+   - Différenciantes vs concurrence
+   - Concrètes et réalisables
+4. **Preuves documentées** (citations <25 mots des docs concurrents)
+
+IMPORTANT:
+- Utilise RAG pour récupérer passages des propositions concurrentes
+- Compare: méthodologie, arguments, présentation, points forts
+- Identifie GAPS (ce qu'ils n'ont pas couvert)
+- Propose améliorations DIFFÉRENCIANTES et réalistes
+- N'invente PAS de contenu concurrent non documenté
+- Focus sur critères à fort coefficient pour maximiser notation"""
+        }
+        
         context_parts = [
-            f"Type de tâche demandée: {task_type}",
-            f"Version: {version}",
+            f"VERSION: {version}",
+            task_instructions.get(task_type, f"Type de tâche demandée: {task_type}"),
         ]
         if extract_blocks:
             context_parts.append("\n".join(extract_blocks))
